@@ -16,12 +16,12 @@ class PlayerAvailabilityAnalyzer {
         availability: PlayerAvailability,
         minutesPlayed: Int,
         starts: Int,
-        totalGameweeks: Int
+        completedGameweeks: Int
     ): AvailabilityAssessment {
         val status = availability.status
         val chance = availability.chanceOfPlayingNextRound
 
-        // Injured, suspended or 0% chance
+        // 1. Injured, suspended or 0% chance
         if (status == "i" || status == "s" || status == "u" || chance == 0) {
             val reason = when (status) {
                 "i" -> "مصاب (${availability.news.ifEmpty { "غير متاح" }})"
@@ -37,7 +37,7 @@ class PlayerAvailabilityAnalyzer {
             )
         }
 
-        // Conditional chance (25%, 50%, 75%)
+        // 2. Conditional chance (25%, 50%, 75%)
         if (chance != null && chance < 100) {
             val (prob, expMins, risk) = when (chance) {
                 25 -> Triple(0.20, 18.0, 0.80)
@@ -53,10 +53,10 @@ class PlayerAvailabilityAnalyzer {
             )
         }
 
-        // Available (100% or null) - assess starter role vs bench sub
-        val completedGws = if (totalGameweeks > 0) totalGameweeks else 1
-        val startRatio = starts.toDouble() / completedGws.coerceAtLeast(1)
-        val avgMinutes = minutesPlayed.toDouble() / completedGws.coerceAtLeast(1)
+        // 3. Available (100% or null) - assess starter role vs bench sub using completed gameweeks
+        val safeCompleted = completedGameweeks.coerceAtLeast(1)
+        val startRatio = starts.toDouble() / safeCompleted
+        val avgMinutes = minutesPlayed.toDouble() / safeCompleted
 
         val (metrics, summary) = when {
             startRatio >= 0.80 || avgMinutes >= 75.0 -> {
@@ -84,12 +84,104 @@ class PlayerAvailabilityAnalyzer {
         )
     }
 
+    /**
+     * Assesses availability for the current immediate gameweek.
+     * Uses (currentGameweek - 1) as completed gameweeks count.
+     */
     fun assess(player: PlayerModel, currentGameweek: Int): AvailabilityAssessment {
+        val completedGws = (currentGameweek - 1).coerceAtLeast(1)
         return assessAvailability(
             availability = player.availability,
             minutesPlayed = player.minutesPlayed,
             starts = player.starts,
-            totalGameweeks = currentGameweek.coerceAtLeast(1)
+            completedGameweeks = completedGws
         )
+    }
+
+    /**
+     * Evaluates availability dynamically across future gameweeks.
+     * Models recovery progression over time rather than holding near-term doubts fixed indefinitely.
+     */
+    fun assessForGameweek(
+        player: PlayerModel,
+        targetGameweek: Int,
+        currentGameweek: Int
+    ): AvailabilityAssessment {
+        val completedGws = (currentGameweek - 1).coerceAtLeast(1)
+        val gwDelta = (targetGameweek - currentGameweek).coerceAtLeast(0)
+
+        // For current gameweek, use direct medical status
+        if (gwDelta == 0) {
+            return assessAvailability(player.availability, player.minutesPlayed, player.starts, completedGws)
+        }
+
+        val baseAssessment = assessAvailability(
+            availability = PlayerAvailability.parse(status = "a", chance = 100, news = ""),
+            minutesPlayed = player.minutesPlayed,
+            starts = player.starts,
+            completedGameweeks = completedGws
+        )
+
+        val status = player.availability.status
+        val chance = player.availability.chanceOfPlayingNextRound
+
+        // Severe long-term injury: status 'i' with 0% chance or long return horizon
+        if ((status == "i" || status == "u") && chance == 0) {
+            val newsLower = player.availability.news.lowercase()
+            val isKnownLongTerm = newsLower.contains("months") || newsLower.contains("season") ||
+                    newsLower.contains("acl") || newsLower.contains("surgery")
+
+            return if (isKnownLongTerm || gwDelta <= 2) {
+                AvailabilityAssessment(
+                    startProbability = 0.0,
+                    expectedMinutes = 0.0,
+                    riskFactor = 1.0,
+                    summaryAr = "إصابة طويلة الأمد - مستبعد للجولة $targetGameweek"
+                )
+            } else {
+                // Potential gradual return in later weeks
+                AvailabilityAssessment(
+                    startProbability = (baseAssessment.startProbability * 0.40),
+                    expectedMinutes = (baseAssessment.expectedMinutes * 0.40),
+                    riskFactor = 0.70,
+                    summaryAr = "مرحلة تأهيل تدريجي للجولة $targetGameweek"
+                )
+            }
+        }
+
+        // Suspensions (typically 1-3 matches)
+        if (status == "s") {
+            return if (gwDelta <= 1) {
+                AvailabilityAssessment(
+                    startProbability = 0.0,
+                    expectedMinutes = 0.0,
+                    riskFactor = 1.0,
+                    summaryAr = "موقوف للجولة $targetGameweek"
+                )
+            } else {
+                baseAssessment
+            }
+        }
+
+        // Minor doubts (25%, 50%, 75%): progressive recovery over time
+        if (chance != null && chance < 100) {
+            val recoveryFactor = when {
+                chance >= 75 -> 1.0 // Fully recovered by next week
+                chance >= 50 -> if (gwDelta >= 2) 1.0 else 0.85
+                chance >= 25 -> if (gwDelta >= 3) 1.0 else (0.50 + 0.25 * gwDelta)
+                else -> (gwDelta * 0.30).coerceIn(0.0, 1.0)
+            }
+
+            return AvailabilityAssessment(
+                startProbability = Math.round(baseAssessment.startProbability * recoveryFactor * 100.0) / 100.0,
+                expectedMinutes = Math.round(baseAssessment.expectedMinutes * recoveryFactor * 10.0) / 10.0,
+                riskFactor = Math.round((1.0 - recoveryFactor * (1.0 - baseAssessment.riskFactor)) * 100.0) / 100.0,
+                summaryAr = if (recoveryFactor >= 0.95) "متوقع تعافيه تماماً بحلول الجولة $targetGameweek"
+                else "احتمالية مشاركة بنسبة ${(recoveryFactor * 100).toInt()}% بعد التعافي للجولة $targetGameweek"
+            )
+        }
+
+        // Healthy player: standard baseline assessment
+        return baseAssessment
     }
 }

@@ -112,9 +112,15 @@ class ExpectedPointsCalculatorTest {
         val player = createDummyPlayer(totalPoints = 85)
         val prediction = calculator.calculateExpectedPoints(player, currentGameweek = 10)
 
-        assertEquals("Actual points must equal player's totalPoints", 85, prediction.actualPoints)
-        assertEquals("Actual captain points must be 2x totalPoints", 170, prediction.actualCaptainPoints)
-        assertNotEquals("Actual points must be separate from predicted points", prediction.actualPoints.toDouble(), prediction.expectedPoints)
+        // For future gameweeks, actual points are null (not contaminated by season totalPoints)
+        assertNull("Actual points must be null for upcoming gameweeks", prediction.actualPoints)
+        assertNull("Actual captain points must be null for upcoming gameweeks", prediction.actualCaptainPoints)
+        assertTrue("Predicted points must be positive", prediction.expectedPoints > 0.0)
+
+        // Verifying that actual points can be recorded independently without affecting prediction
+        val historicalRecord = prediction.copy(actualPoints = 9, actualCaptainPoints = 18)
+        assertEquals(9, historicalRecord.actualPoints)
+        assertEquals(18, historicalRecord.actualCaptainPoints)
     }
 
     @Test

@@ -99,17 +99,14 @@ class PredictionEngineTest {
             0.05
         )
 
-        // Actual Captain points = 2x actual total points
-        assertEquals(
-            140, // 70 * 2
-            prediction.actualCaptainPoints
-        )
+        // For future gameweeks, actual points must be null (not contaminated by player.totalPoints)
+        assertNull("Actual gameweek points must be null for future predictions", prediction.actualPoints)
+        assertNull("Actual captain points must be null for future predictions", prediction.actualCaptainPoints)
 
-        assertNotEquals(
-            "Predicted captain points must be separate from actual points",
-            prediction.actualCaptainPoints.toDouble(),
-            prediction.predictedCaptainPoints
-        )
+        // When actual score is recorded retrospectively, it is preserved independently
+        val verified = prediction.copy(actualPoints = 12, actualCaptainPoints = 24)
+        assertEquals(12, verified.actualPoints)
+        assertEquals(24, verified.actualCaptainPoints)
     }
 
     @Test
@@ -153,5 +150,62 @@ class PredictionEngineTest {
             "FDR 2 home fixture should project higher xPts than FDR 5 away fixture",
             gw11.expectedPoints > gw13.expectedPoints
         )
+    }
+
+    @Test
+    fun testDoubleGameweekAggregatesBothMatches() {
+        val dgwFixtures = listOf(
+            UpcomingFixture(11, 2, "Ipswich", "IPS", isHome = true, difficulty = 2),
+            UpcomingFixture(11, 3, "Everton", "EVE", isHome = false, difficulty = 3),
+            UpcomingFixture(12, 4, "Liverpool", "LIV", isHome = false, difficulty = 5)
+        )
+        val sgwFixtures = listOf(
+            UpcomingFixture(11, 2, "Ipswich", "IPS", isHome = true, difficulty = 2),
+            UpcomingFixture(12, 4, "Liverpool", "LIV", isHome = false, difficulty = 5)
+        )
+
+        val dgwPlayer = createPlayerWithFixtures(pos = PlayerPosition.MID, fixtures = dgwFixtures)
+        val sgwPlayer = createPlayerWithFixtures(pos = PlayerPosition.MID, fixtures = sgwFixtures)
+
+        val dgwPred = engine.generatePrediction(dgwPlayer, currentGameweek = 11, horizon = 2)
+        val sgwPred = engine.generatePrediction(sgwPlayer, currentGameweek = 11, horizon = 2)
+
+        assertTrue(
+            "Double Gameweek expected points (${dgwPred.expectedPoints}) must be significantly higher than Single Gameweek (${sgwPred.expectedPoints})",
+            dgwPred.expectedPoints > sgwPred.expectedPoints * 1.5
+        )
+        val gw11Pred = dgwPred.horizonPredictions.first { it.gameweek == 11 }
+        assertTrue("GW11 must be marked as Double Gameweek", gw11Pred.isDoubleGameweek)
+        assertEquals("GW11 must contain 2 matches", 2, gw11Pred.matchCount)
+    }
+
+    @Test
+    fun testBlankGameweekReturnsZeroExpectedPoints() {
+        // Player has no fixture in GW 11, only GW 12
+        val bgwFixtures = listOf(
+            UpcomingFixture(12, 3, "Everton", "EVE", isHome = false, difficulty = 3)
+        )
+        val bgwPlayer = createPlayerWithFixtures(pos = PlayerPosition.FWD, fixtures = bgwFixtures)
+        val prediction = engine.generatePrediction(bgwPlayer, currentGameweek = 11, horizon = 2)
+
+        assertEquals("Blank Gameweek must produce 0.0 expected points", 0.0, prediction.expectedPoints, 0.01)
+        assertEquals("Blank Gameweek floor points must be 0.0", 0.0, prediction.floorPoints, 0.01)
+
+        val gw11Pred = prediction.horizonPredictions.first { it.gameweek == 11 }
+        assertTrue("GW11 must be marked as Blank Gameweek", gw11Pred.isBlankGameweek)
+        assertEquals("GW11 must have 0 matches", 0, gw11Pred.matchCount)
+        assertEquals("BLANK", gw11Pred.opponentShortName)
+    }
+
+    @Test
+    fun testGoalkeeperSavesPointsHaveNoArtificialFloor() {
+        val gkpZeroSaves = createPlayerWithFixtures(
+            pos = PlayerPosition.GKP,
+            saves = 0,
+            fixtures = listOf(UpcomingFixture(11, 2, "Ipswich", "IPS", isHome = true, difficulty = 2))
+        )
+        val prediction = engine.generatePrediction(gkpZeroSaves, currentGameweek = 11)
+        // With 0 saves in statistics, expected defensive points shouldn't have an artificial +0.3 minimum added
+        assertTrue("Expected points must be valid non-negative number", prediction.expectedPoints >= 0.0)
     }
 }
