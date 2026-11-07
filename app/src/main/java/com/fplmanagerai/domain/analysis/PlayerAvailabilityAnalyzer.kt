@@ -16,8 +16,10 @@ class PlayerAvailabilityAnalyzer {
         availability: PlayerAvailability,
         minutesPlayed: Int,
         starts: Int,
-        completedGameweeks: Int
+        completedGameweeks: Int = 1,
+        totalGameweeks: Int = completedGameweeks
     ): AvailabilityAssessment {
+        val safeGameweeks = if (totalGameweeks != 1) totalGameweeks else completedGameweeks
         val status = availability.status
         val chance = availability.chanceOfPlayingNextRound
 
@@ -54,7 +56,7 @@ class PlayerAvailabilityAnalyzer {
         }
 
         // 3. Available (100% or null) - assess starter role vs bench sub using completed gameweeks
-        val safeCompleted = completedGameweeks.coerceAtLeast(1)
+        val safeCompleted = safeGameweeks.coerceAtLeast(1)
         val startRatio = starts.toDouble() / safeCompleted
         val avgMinutes = minutesPlayed.toDouble() / safeCompleted
 
