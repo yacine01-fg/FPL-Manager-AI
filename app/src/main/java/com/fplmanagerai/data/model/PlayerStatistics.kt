@@ -22,6 +22,16 @@ data class PlayerStatistics(
     val yellowCards: Int,
     val redCards: Int
 ) {
-    val hasExpectedMetrics: Boolean
+    val hasAnyExpectedMetrics: Boolean
+        get() = expectedGoals != null || expectedAssists != null
+
+    val hasCompleteExpectedMetrics: Boolean
         get() = expectedGoals != null && expectedAssists != null
+
+    @Deprecated(
+        message = "Use hasCompleteExpectedMetrics or hasAnyExpectedMetrics instead for clarity",
+        replaceWith = ReplaceWith("hasCompleteExpectedMetrics")
+    )
+    val hasExpectedMetrics: Boolean
+        get() = hasCompleteExpectedMetrics
 }

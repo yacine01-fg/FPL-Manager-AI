@@ -100,7 +100,11 @@ class PredictionEngine(
 
         // 6. Confidence Score based on data transparency and stability
         var confidence = 0.50
-        if (player.statistics.hasExpectedMetrics) confidence += 0.20
+        if (player.statistics.hasCompleteExpectedMetrics) {
+            confidence += 0.20
+        } else if (player.statistics.hasAnyExpectedMetrics) {
+            confidence += 0.10
+        }
         if (player.minutesPlayed > 450) confidence += 0.15
         if (availability.riskFactor < 0.1) confidence += 0.15
         val finalConfidence = Math.round(confidence.coerceIn(0.30, 0.95) * 100.0) / 100.0
