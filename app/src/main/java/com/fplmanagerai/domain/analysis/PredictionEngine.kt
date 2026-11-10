@@ -1,18 +1,23 @@
 package com.fplmanagerai.domain.analysis
 
 import com.fplmanagerai.data.model.*
+import com.fplmanagerai.domain.calibration.ModelVersion
+import com.fplmanagerai.domain.calibration.ModelVersionRepository
+import com.fplmanagerai.domain.calibration.ModelVersionStatus
 import java.util.Locale
 
 class PredictionEngine(
     private val availabilityAnalyzer: PlayerAvailabilityAnalyzer = PlayerAvailabilityAnalyzer(),
     private val fixtureAnalyzer: FixtureDifficultyAnalyzer = FixtureDifficultyAnalyzer(),
-    private val performanceAnalyzer: PlayerPerformanceAnalyzer = PlayerPerformanceAnalyzer()
+    private val performanceAnalyzer: PlayerPerformanceAnalyzer = PlayerPerformanceAnalyzer(),
+    private val modelVersionRepository: ModelVersionRepository = ModelVersionRepository()
 ) {
 
     fun generatePrediction(
         player: PlayerModel,
         currentGameweek: Int,
-        horizon: Int = 1
+        horizon: Int = 1,
+        activeModel: ModelVersion? = modelVersionRepository.getActiveModel()
     ): PlayerPrediction {
         // 1. تحديد مباريات الجولة المستهدفة.
         val fixturesByGameweek = player.upcomingFixtures
@@ -148,8 +153,32 @@ class PredictionEngine(
         }
         val finalConfidence = round2(confidence.coerceIn(0.30, 0.95))
 
+        // تطبيق المعايرة الذاتية إذا كان هناك نموذج معاير نشط ومعتمد
+        val isCalibratedActive = activeModel != null && activeModel.status == ModelVersionStatus.ACTIVE && !activeModel.isBaseline
+        val finalExpectedPoints: Double
+        val finalExpectedMinutes: Double
+        val finalStartProbability: Double
+        val calibratedFinalConfidence: Double
+
+        if (isCalibratedActive) {
+            val factors = activeModel.calibrationFactors
+            val posMult = factors.getMultiplierForPosition(player.position)
+            val posOffset = factors.getBiasOffsetForPosition(player.position)
+            val minsRiskMult = factors.getMinutesMultiplierForRisk(performance.riskLevel)
+
+            finalExpectedPoints = round1(((singleGwResult.expectedPoints * posMult) + posOffset).coerceAtLeast(0.0))
+            finalExpectedMinutes = round1((expMinutes * minsRiskMult).coerceIn(0.0, 90.0))
+            finalStartProbability = round2(((startProb * factors.startProbScale) + factors.startProbOffset).coerceIn(0.0, 1.0))
+            calibratedFinalConfidence = round2((finalConfidence * factors.confidenceDamping).coerceIn(0.20, 0.95))
+        } else {
+            finalExpectedPoints = singleGwResult.expectedPoints
+            finalExpectedMinutes = round1(expMinutes)
+            finalStartProbability = round2(startProb)
+            calibratedFinalConfidence = finalConfidence
+        }
+
         // 7. نقاط القائد المتوقعة.
-        val predictedCaptainPoints = round1(singleGwResult.expectedPoints * 2.0)
+        val predictedCaptainPoints = round1(finalExpectedPoints * 2.0)
 
         // 8. توصية الانتقالات.
         val (recommendation, reason) = when {
@@ -164,7 +193,7 @@ class PredictionEngine(
             performance.riskLevel != RiskLevel.HIGH -> {
                 TransferRecommendation.BUY to "توصية شراء: أداء مرتفع ونقاط متوقعة %.1f".format(
                     Locale.US,
-                    singleGwResult.expectedPoints
+                    finalExpectedPoints
                 )
             }
             performance.performanceScore <= 35.0 && player.price >= 5.5 -> {
@@ -181,15 +210,18 @@ class PredictionEngine(
             append("+ الهجوم (+%.2f) ".format(Locale.US, singleGwResult.attackingPoints))
             append("+ الدفاع (%.2f) ".format(Locale.US, singleGwResult.defensivePoints))
             append("+ البونص (+%.2f). ".format(Locale.US, singleGwResult.bonusPoints))
-            append("المدى التقديري: [${singleGwResult.floorPoints} إلى ${singleGwResult.ceilingPoints}] نقطة.")
+            if (isCalibratedActive) {
+                append(" (معاير ${activeModel.id}).")
+            }
+            append(" المدى التقديري: [${singleGwResult.floorPoints} إلى ${singleGwResult.ceilingPoints}] نقطة.")
         }
 
         return PlayerPrediction(
             playerId = player.id,
             gameweek = targetGameweek,
-            expectedPoints = singleGwResult.expectedPoints,
-            expectedMinutes = round1(expMinutes),
-            startProbability = round2(startProb),
+            expectedPoints = finalExpectedPoints,
+            expectedMinutes = finalExpectedMinutes,
+            startProbability = finalStartProbability,
             expectedAttackingPoints = round1(singleGwResult.attackingPoints),
             expectedDefensivePoints = round1(singleGwResult.defensivePoints),
             expectedCleanSheetPoints = round1(singleGwResult.cleanSheetPoints),
@@ -200,7 +232,7 @@ class PredictionEngine(
             // سنفصل بيانات الأداء الفعلي عن التوقعات في تعديل النموذج.
             actualPoints = player.totalPoints,
             actualCaptainPoints = player.totalPoints * 2,
-            confidenceScore = finalConfidence,
+            confidenceScore = calibratedFinalConfidence,
             recommendation = recommendation,
             recommendationReason = reason,
             analysisScore = performance.performanceScore,

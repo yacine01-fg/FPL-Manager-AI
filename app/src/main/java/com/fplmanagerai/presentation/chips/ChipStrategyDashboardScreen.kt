@@ -26,9 +26,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.fplmanagerai.data.model.DataSyncStatus
 import com.fplmanagerai.data.model.PlayerModel
 import com.fplmanagerai.data.model.PlayerPosition
 import com.fplmanagerai.domain.chips.*
+import com.fplmanagerai.presentation.components.FplAccountLinkDialog
 import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -68,6 +70,13 @@ fun ChipStrategyDashboardScreen(
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                             )
+                        }
+                        IconButton(onClick = { viewModel.setAccountDialogVisible(true) }) {
+                            if (uiState.accountProfile != null) {
+                                Icon(Icons.Default.AccountCircle, contentDescription = "حساب FPL", tint = MaterialTheme.colorScheme.primary)
+                            } else {
+                                Icon(Icons.Default.AddLink, contentDescription = "ربط حساب FPL")
+                            }
                         }
                         IconButton(onClick = { viewModel.loadStrategy(forceRefresh = true) }) {
                             Icon(Icons.Default.Refresh, contentDescription = "تحديث البيانات")
@@ -138,6 +147,118 @@ fun ChipStrategyDashboardScreen(
                             contentPadding = PaddingValues(16.dp),
                             verticalArrangement = Arrangement.spacedBy(16.dp)
                         ) {
+                            // 0. Account Status
+                            item {
+                                val profile = uiState.accountProfile
+                                if (profile != null) {
+                                    val isHistoryConfirmed = uiState.userHistory.isChipHistoryConfirmed
+                                    val statusText = if (isHistoryConfirmed) {
+                                        "الحساب مرتبط: ${profile.teamName} • سجل الشرائح مؤكد"
+                                    } else {
+                                        "الحساب مرتبط: ${profile.teamName} • بانتظار تأكيد سجل الشرائح"
+                                    }
+                                    val statusColor = if (isHistoryConfirmed) Color(0xFF047857) else Color(0xFFB45309)
+                                    val iconTint = if (isHistoryConfirmed) Color(0xFF10B981) else Color(0xFFD97706)
+
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFF10B981).copy(alpha = 0.12f),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { viewModel.setAccountDialogVisible(true) }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(if (isHistoryConfirmed) Icons.Default.CheckCircle else Icons.Default.SyncProblem, contentDescription = null, tint = iconTint, modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(
+                                                    text = statusText,
+                                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                                    color = statusColor
+                                                )
+                                            }
+                                            Text(
+                                                text = "إدارة",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.45f),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable { viewModel.setAccountDialogVisible(true) }
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Icon(Icons.Default.AddLink, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.size(18.dp))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text(
+                                                    text = "اربط Team ID لمزامنة الشرائح المستهلكة رسمياً",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                                                )
+                                            }
+                                            Text(
+                                                text = "ربط الآن",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            // 0b. Data Sync Status Pill
+                            item {
+                                val syncStatus = uiState.dataSyncStatus
+                                val timeText = uiState.lastUpdatedTimeFormatted
+                                val (bgColor, textColor, icon) = when (syncStatus) {
+                                    DataSyncStatus.LIVE -> Triple(Color(0xFF10B981).copy(alpha = 0.15f), Color(0xFF047857), Icons.Default.CloudDone)
+                                    DataSyncStatus.CACHED -> Triple(Color(0xFF3B82F6).copy(alpha = 0.15f), Color(0xFF1D4ED8), Icons.Default.Inventory2)
+                                    DataSyncStatus.STALE -> Triple(Color(0xFFF59E0B).copy(alpha = 0.15f), Color(0xFFB45309), Icons.Default.Update)
+                                    DataSyncStatus.ERROR -> Triple(Color(0xFFEF4444).copy(alpha = 0.15f), Color(0xFFB91C1C), Icons.Default.CloudOff)
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = bgColor,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(icon, contentDescription = null, tint = textColor, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text(
+                                                text = "${syncStatus.badgeAr} • $timeText",
+                                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                color = textColor
+                                            )
+                                        }
+                                        Text(
+                                            text = "تحديث الآن",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = textColor,
+                                            modifier = Modifier.clickable { viewModel.loadStrategy(forceRefresh = true) }
+                                        )
+                                    }
+                                }
+                            }
+
                             // Feedback / Rule Violation Alert Bar
                             if (uiState.actionAlertMessageAr != null) {
                                 item {
@@ -375,6 +496,18 @@ fun ChipStrategyDashboardScreen(
                         onDismiss = { viewModel.closeSquadPreview() }
                     )
                 }
+
+                // FPL Team ID Account Link Dialog
+                if (uiState.showAccountDialog) {
+                    FplAccountLinkDialog(
+                        currentProfile = uiState.accountProfile,
+                        isLoading = uiState.isAccountLinkingLoading,
+                        errorMessage = uiState.accountLinkingError,
+                        onLink = { teamId -> viewModel.linkFplAccount(teamId) },
+                        onUnlink = { viewModel.unlinkFplAccount() },
+                        onDismiss = { viewModel.setAccountDialogVisible(false) }
+                    )
+                }
             }
         }
     }
@@ -517,6 +650,7 @@ fun ChipCardView(
                     ChipStatus.ACTIVE_THIS_GW -> "نشط حالياً" to Color(0xFF22C55E)
                     ChipStatus.USED -> "مُستخدمة" to MaterialTheme.colorScheme.outline
                     ChipStatus.EXPIRED -> "منتهية الصلاحية" to Color(0xFFEF4444)
+                    ChipStatus.UNKNOWN -> "غير مؤكد" to Color(0xFFD97706)
                 }
 
                 Surface(

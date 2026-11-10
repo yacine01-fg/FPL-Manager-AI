@@ -417,6 +417,24 @@ fun SquadOptimizerTab(
                     viewModel.selectPlayer(player)
                 }
             }
+
+            if (squad.tacticalNotesAr.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+                ) {
+                    Column(Modifier.padding(12.dp)) {
+                        Text("ملاحظات التكتيك وجاهزية الشرائح (Chips):", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(6.dp))
+                        squad.tacticalNotesAr.forEach { note ->
+                            Text("• $note", style = MaterialTheme.typography.bodySmall)
+                            Spacer(Modifier.height(2.dp))
+                        }
+                    }
+                }
+            }
         }
     }
 }

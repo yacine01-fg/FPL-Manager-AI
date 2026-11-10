@@ -3,6 +3,7 @@ package com.fplmanagerai.domain.analysis
 import com.fplmanagerai.data.model.PlayerModel
 import com.fplmanagerai.data.model.PlayerPosition
 import com.fplmanagerai.data.model.RiskLevel
+import kotlin.math.roundToInt
 
 data class PerformanceMetrics(
     val pointsPer90: Double,
@@ -11,11 +12,11 @@ data class PerformanceMetrics(
     val xGIPer90: Double?,
     val valueForm: Double,
     val valueSeason: Double,
-    val finishingEfficiency: Double?, // positive = overperforming xG, negative = underperforming
-    val minutesReliability: Double, // 0.0 to 1.0
-    val consistencyScore: Double, // 0.0 to 100.0
-    val performanceScore: Double, // 0.0 to 100.0
-    val reliabilityScore: Double, // 0.0 to 100.0
+    val finishingEfficiency: Double?,
+    val minutesReliability: Double,
+    val consistencyScore: Double,
+    val performanceScore: Double,
+    val reliabilityScore: Double,
     val riskLevel: RiskLevel,
     val goalInvolvementPercent: Double?,
     val summaryAr: String,
@@ -30,136 +31,277 @@ class PlayerPerformanceAnalyzer {
         teamTotalGoals: Int = 0,
         averageUpcomingFdr: Double = 3.0
     ): PerformanceMetrics {
+
         val gws = completedGameweeks.coerceAtLeast(1)
-        val mins = player.minutesPlayed.toDouble()
-        val nineties = if (mins >= 45.0) mins / 90.0 else (gws * 0.5)
-
-        val p90 = if (nineties > 0.0) player.totalPoints / nineties else 0.0
-
         val stats = player.statistics
-        val xG90 = stats.expectedGoals?.let { it / nineties }
-        val xA90 = stats.expectedAssists?.let { it / nineties }
-        val xGI90 = stats.expectedGoalInvolvements?.let { it / nineties }
 
-        val finishingEfficiency = if (stats.expectedGoals != null && stats.expectedGoals > 0.0) {
-            stats.goals - stats.expectedGoals
-        } else null
+        val minutes = player.minutesPlayed.coerceAtLeast(0)
+        val starts = player.starts.coerceAtLeast(0)
 
-        // Value metrics
+        val nineties = (minutes / 90.0).coerceAtLeast(0.01)
+
+        val pointsPer90 = player.totalPoints.coerceAtLeast(0) / nineties
+
+        val xG90 = stats.expectedGoals?.takeIf { it >= 0.0 }?.div(nineties)
+        val xA90 = stats.expectedAssists?.takeIf { it >= 0.0 }?.div(nineties)
+        val xGI90 = stats.expectedGoalInvolvements
+            ?.takeIf { it >= 0.0 }
+            ?.div(nineties)
+            ?: if (xG90 != null || xA90 != null) {
+                (xG90 ?: 0.0) + (xA90 ?: 0.0)
+            } else {
+                null
+            }
+
+        // الفارق بين الأهداف الفعلية والمتوقعة، وليس نسبة تحويل الفرص.
+        val finishingEfficiency = stats.expectedGoals
+            ?.takeIf { it > 0.0 }
+            ?.let { stats.goals - it }
+
+        // القيمة مقابل السعر.
         val price = player.price.coerceAtLeast(3.8)
-        val valueForm = player.form / price
-        val valueSeason = player.totalPoints / price
+        val valueForm = player.form.coerceAtLeast(0.0) / price
+        val valueSeason = player.totalPoints.coerceAtLeast(0) / price
 
-        // Goal Involvement Percentage
         val goalInvolvementPercent = if (teamTotalGoals > 0) {
-            ((stats.goals + stats.assists).toDouble() / teamTotalGoals * 100.0).coerceIn(0.0, 100.0)
-        } else null
+            (
+                (stats.goals + stats.assists).toDouble() /
+                    teamTotalGoals * 100.0
+                ).coerceIn(0.0, 100.0)
+        } else {
+            null
+        }
 
-        // 1. Reliability Score Calculation (0.0 to 100.0)
-        // A. Health & Availability (45 points)
+        // 1. مؤشرات المشاركة والموثوقية.
+        val startsRatio = (starts.toDouble() / gws).coerceIn(0.0, 1.0)
+
+        val minutesRatio = (
+            minutes.toDouble() / (gws * 90.0)
+            ).coerceIn(0.0, 1.0)
+
         val chance = player.availability.chanceOfPlayingNextRound
-        val status = player.availability.status
-        val healthScore = when {
-            status == "i" || status == "s" || status == "u" || chance == 0 -> 0.0
-            chance == 25 -> 10.0
-            chance == 50 -> 22.0
-            chance == 75 -> 34.0
-            else -> 45.0
+        val status = player.availability.status.lowercase()
+
+        val medicalProbability = when {
+            status == "i" || status == "s" || status == "u" -> 0.0
+            chance != null -> (chance / 100.0).coerceIn(0.0, 1.0)
+            status == "d" -> 0.75
+            else -> 1.0
         }
 
-        // B. Minutes Security (35 points)
-        val startsRatio = (player.starts.toDouble() / gws).coerceIn(0.0, 1.0)
-        val maxExpectedMins = gws * 90.0
-        val minutesRatio = (mins / maxExpectedMins).coerceIn(0.0, 1.0)
-        val minutesSecurityScore = (startsRatio * 0.60 + minutesRatio * 0.40) * 35.0
+        val healthScore = medicalProbability * 45.0
 
-        // C. Discipline & Consistency (20 points)
-        val yellowPenalty = (stats.yellowCards * 1.5).coerceAtMost(10.0)
-        val redPenalty = (stats.redCards * 6.0).coerceAtMost(12.0)
-        val disciplineScore = (20.0 - yellowPenalty - redPenalty).coerceIn(3.0, 20.0)
+        val minutesSecurityScore = (
+            startsRatio * 0.60 + minutesRatio * 0.40
+            ) * 35.0
 
-        val reliabilityScore = Math.round((healthScore + minutesSecurityScore + disciplineScore) * 10.0) / 10.0
+        val yellowPenalty = (stats.yellowCards.coerceAtLeast(0) * 1.0)
+            .coerceAtMost(8.0)
 
-        // 2. Performance Score Calculation (0.0 to 100.0)
-        // A. Form Weight (30 points)
-        val formFactor = (player.form / 8.0).coerceIn(0.0, 1.0) * 30.0
+        val redPenalty = (stats.redCards.coerceAtLeast(0) * 6.0)
+            .coerceAtMost(12.0)
 
-        // B. Underlying Production Weight (35 points)
-        val productionFactor = when (player.position) {
+        val disciplineScore = (
+            20.0 - yellowPenalty - redPenalty
+            ).coerceAtLeast(0.0)
+
+        val reliabilityScore = round1(
+            (healthScore + minutesSecurityScore + disciplineScore)
+                .coerceIn(0.0, 100.0)
+        )
+
+        // 2. تقييم الإنتاج الهجومي والدفاعي.
+        val formScore = (
+            player.form.coerceAtLeast(0.0) / 8.0
+            ).coerceIn(0.0, 1.0) * 25.0
+
+        val productionScore = when (player.position) {
             PlayerPosition.FWD, PlayerPosition.MID -> {
-                val effectiveXgi90 = xGI90 ?: ((stats.goals + stats.assists).toDouble() / nineties)
-                (effectiveXgi90 / 0.70).coerceIn(0.0, 1.0) * 35.0
+                val production = xGI90 ?: (
+                    (stats.goals + stats.assists).toDouble() / nineties
+                    )
+
+                (production / 0.70).coerceIn(0.0, 1.0) * 35.0
             }
-            PlayerPosition.DEF, PlayerPosition.GKP -> {
-                val csRatio = stats.cleanSheets.toDouble() / gws
-                val attBonus = (stats.goals * 0.4 + stats.assists * 0.3)
-                ((csRatio * 1.5 + attBonus) / 0.8).coerceIn(0.0, 1.0) * 35.0
+
+            PlayerPosition.DEF -> {
+                val cleanSheetRate = (
+                    stats.cleanSheets.toDouble() / gws
+                    ).coerceIn(0.0, 1.0)
+
+                val attackingContribution = (
+                    stats.goals * 0.45 + stats.assists * 0.35
+                    ).coerceAtMost(1.0)
+
+                (
+                    cleanSheetRate * 0.65 +
+                        attackingContribution * 0.35
+                    ).coerceIn(0.0, 1.0) * 35.0
+            }
+
+            PlayerPosition.GKP -> {
+                val cleanSheetRate = (
+                    stats.cleanSheets.toDouble() / gws
+                    ).coerceIn(0.0, 1.0)
+
+                val saveRate = (
+                    stats.saves.toDouble() / nineties
+                    ).coerceIn(0.0, 8.0) / 8.0
+
+                (
+                    cleanSheetRate * 0.65 +
+                        saveRate * 0.35
+                    ).coerceIn(0.0, 1.0) * 35.0
             }
         }
 
-        // C. Points Per 90 (20 points)
-        val p90Factor = (p90 / 6.5).coerceIn(0.0, 1.0) * 20.0
+        val pointsScore = (
+            pointsPer90 / 7.0
+            ).coerceIn(0.0, 1.0) * 20.0
 
-        // D. Fixture Ease Factor (15 points)
-        val fixtureFactor = ((5.2 - averageUpcomingFdr) / 3.2).coerceIn(0.0, 1.0) * 15.0
+        val fixtureScore = (
+            (5.0 - averageUpcomingFdr.coerceIn(1.0, 5.0)) / 4.0
+            ).coerceIn(0.0, 1.0) * 10.0
 
-        val performanceScore = Math.round((formFactor + productionFactor + p90Factor + fixtureFactor) * 10.0) / 10.0
+        // تخفيض الثقة في التقييم عندما تكون العينة صغيرة.
+        val sampleConfidence = (
+            minutes / 900.0
+            ).coerceIn(0.35, 1.0)
 
-        // 3. Risk Level Classification
+        val rawPerformance = (
+            formScore +
+                productionScore +
+                pointsScore +
+                fixtureScore
+            )
+
+        val performanceScore = round1(
+            (
+                rawPerformance * (0.75 + sampleConfidence * 0.25)
+                ).coerceIn(0.0, 100.0)
+        )
+
+        // 3. الاتساق: استقرار المشاركة والدقائق.
+        val consistencyScore = round1(
+            (
+                startsRatio * 60.0 +
+                    minutesRatio * 40.0
+                ).coerceIn(0.0, 100.0)
+        )
+
+        // 4. تصنيف المخاطر.
         val riskLevel = when {
-            status == "i" || status == "s" || status == "u" || chance == 0 || minutesRatio < 0.15 -> {
-                RiskLevel.CRITICAL
-            }
-            chance in 25..50 || startsRatio < 0.40 || averageUpcomingFdr >= 4.2 -> {
-                RiskLevel.HIGH
-            }
-            chance == 75 || startsRatio in 0.40..0.72 || averageUpcomingFdr in 3.4..4.1 -> {
-                RiskLevel.MEDIUM
-            }
-            else -> {
-                RiskLevel.LOW
-            }
+            medicalProbability <= 0.0 -> RiskLevel.CRITICAL
+
+            medicalProbability < 0.50 -> RiskLevel.CRITICAL
+
+            minutes < 90 && gws >= 3 -> RiskLevel.HIGH
+
+            medicalProbability < 0.75 -> RiskLevel.HIGH
+
+            startsRatio < 0.35 -> RiskLevel.HIGH
+
+            averageUpcomingFdr >= 4.3 -> RiskLevel.HIGH
+
+            medicalProbability < 0.90 -> RiskLevel.MEDIUM
+
+            startsRatio < 0.65 -> RiskLevel.MEDIUM
+
+            averageUpcomingFdr >= 3.6 -> RiskLevel.MEDIUM
+
+            reliabilityScore < 65.0 -> RiskLevel.MEDIUM
+
+            else -> RiskLevel.LOW
         }
 
+        // 5. التفسير.
         val summary = buildString {
             when {
-                player.form >= 6.5 -> append("فترة تألق عالية وأداء استثنائي حالياً. ")
-                player.form >= 4.5 -> append("مردود نقطي متوازن ومستقر. ")
-                player.form >= 2.5 -> append("أداء متذبذب أو يمر بفترة ركود نسبي. ")
-                else -> append("مردود ضعيف في الجولات الأخيرة. ")
+                player.form >= 6.5 ->
+                    append("فورمة مرتفعة وأداء هجومي أو نقطي قوي. ")
+
+                player.form >= 4.5 ->
+                    append("مردود جيد ومتوازن. ")
+
+                player.form >= 2.5 ->
+                    append("مردود متوسط يحتاج إلى متابعة. ")
+
+                else ->
+                    append("فورمة ضعيفة وتراجع في المردود الأخير. ")
+            }
+
+            when {
+                consistencyScore >= 80.0 ->
+                    append("استقرار جيد في المشاركة والدقائق. ")
+
+                consistencyScore >= 50.0 ->
+                    append("استقرار متوسط في دقائق اللعب. ")
+
+                else ->
+                    append("مشاركة غير مستقرة وتحتاج إلى الحذر. ")
             }
 
             if (finishingEfficiency != null) {
                 when {
-                    finishingEfficiency > 2.0 -> append("إنهاء هجومي يفوق المتوقع (قد يكون غير مستدام). ")
-                    finishingEfficiency < -2.0 -> append("إهدار لفرص محققة مع أرقام xG واعدة (مرشح للانفجار التهديفي). ")
-                    else -> append("الإنهاء متطابق تماماً مع الفرص المتاحة. ")
+                    finishingEfficiency > 2.0 ->
+                        append("سجل أهدافاً أكثر من xG، وقد يتراجع هذا المعدل. ")
+
+                    finishingEfficiency < -2.0 ->
+                        append("أهدافه أقل من xG، مع فرص لتحسن التسجيل. ")
+
+                    else ->
+                        append("مردوده التهديفي قريب من المتوقع. ")
                 }
             }
-            append("مستوى الأمان: ${reliabilityScore}/100 [${riskLevel.titleAr}].")
+
+            append("الموثوقية: $reliabilityScore/100. ")
+            append("المخاطرة: ${riskLevel.titleAr}.")
         }
 
-        val calculationDoc = buildString {
-            append("طريقة احتساب مؤشر الأداء (Performance): الفورمة (30%) + المخرجات المتوقعة (35%) + معدل Pts/90 (20%) + سهولة الجدول (15%). ")
-            append("طريقة احتساب مؤشر الموثوقية (Reliability): الجاهزية الطبية (45%) + استقرار دقائق اللعب والبدء أساسياً (35%) + الانضباط وتجنب البطاقات (20%).")
+        val documentation = buildString {
+            append(
+                "الأداء: الفورمة 25 نقطة، الإنتاج الأساسي 35، " +
+                    "النقاط لكل 90 دقيقة 20، وصعوبة الجدول 10. "
+            )
+
+            append(
+                "الموثوقية: الجاهزية الطبية 45 نقطة، " +
+                    "دقائق اللعب والبدء أساسياً 35، والانضباط 20. "
+            )
+
+            append(
+                "الاتساق يقيس انتظام المشاركة والدقائق، " +
+                    "ولا يساوي مؤشر الموثوقية. "
+            )
+
+            append(
+                "تم تخفيض أثر الأداء عند قلة دقائق اللعب، " +
+                    "لأن العينات الصغيرة أقل موثوقية."
+            )
         }
 
         return PerformanceMetrics(
-            pointsPer90 = Math.round(p90 * 10.0) / 10.0,
-            xGPer90 = xG90?.let { Math.round(it * 100.0) / 100.0 },
-            xAPer90 = xA90?.let { Math.round(it * 100.0) / 100.0 },
-            xGIPer90 = xGI90?.let { Math.round(it * 100.0) / 100.0 },
-            valueForm = Math.round(valueForm * 100.0) / 100.0,
-            valueSeason = Math.round(valueSeason * 10.0) / 10.0,
-            finishingEfficiency = finishingEfficiency?.let { Math.round(it * 10.0) / 10.0 },
-            minutesReliability = Math.round(minutesRatio * 100.0) / 100.0,
-            consistencyScore = reliabilityScore,
+            pointsPer90 = round1(pointsPer90),
+            xGPer90 = xG90?.let { round2(it) },
+            xAPer90 = xA90?.let { round2(it) },
+            xGIPer90 = xGI90?.let { round2(it) },
+            valueForm = round2(valueForm),
+            valueSeason = round1(valueSeason),
+            finishingEfficiency = finishingEfficiency?.let { round1(it) },
+            minutesReliability = round2(minutesRatio),
+            consistencyScore = consistencyScore,
             performanceScore = performanceScore,
             reliabilityScore = reliabilityScore,
             riskLevel = riskLevel,
-            goalInvolvementPercent = goalInvolvementPercent?.let { Math.round(it * 10.0) / 10.0 },
+            goalInvolvementPercent = goalInvolvementPercent?.let { round1(it) },
             summaryAr = summary.trim(),
-            calculationDocumentationAr = calculationDoc
+            calculationDocumentationAr = documentation
         )
     }
+
+    private fun round1(value: Double): Double =
+        (value * 10.0).roundToInt() / 10.0
+
+    private fun round2(value: Double): Double =
+        (value * 100.0).roundToInt() / 100.0
 }

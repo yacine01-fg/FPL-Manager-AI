@@ -47,10 +47,44 @@ class BenchBoostAnalyzer(
             )
         }
 
-        // 2. Identify the 4 bench players
-        val benchPlayers = explicitBench ?: identifyBenchPlayers(squad)
+        // 2. Data Validation: Guard against incomplete squad data
+        if (squad.size < 15 && explicitBench == null) {
+            return SingleChipAnalysis(
+                chip = ChipType.BENCH_BOOST,
+                half = half,
+                status = currentState,
+                verdict = ChipVerdict.SAVE_FOR_LATER,
+                recommendedGameweek = currentGameweek,
+                alternativeGameweeks = emptyList(),
+                expectedPointsGain = 0.0,
+                currentGwGain = 0.0,
+                futureOpportunityGain = 0.0,
+                confidence = ChipConfidence.LOW,
+                primaryReasonAr = "بيانات التشكيلة غير مكتملة (تتطلب 15 لاعباً لتقييم الدكة وحساب النقاط الإضافية).",
+                detailedPointsAr = listOf("تأكد من اكتمال التشكيلة (11 أساسياً و4 بدلاء) للتحليل الصحيح.")
+            )
+        }
 
-        // 3. Inspect availability, minutes, starting probability, and fixtures for all 4 bench players
+        // 3. Identify the 4 bench players
+        val benchPlayers = explicitBench ?: identifyBenchPlayers(squad)
+        if (benchPlayers.size < 4) {
+            return SingleChipAnalysis(
+                chip = ChipType.BENCH_BOOST,
+                half = half,
+                status = currentState,
+                verdict = ChipVerdict.SAVE_FOR_LATER,
+                recommendedGameweek = currentGameweek,
+                alternativeGameweeks = emptyList(),
+                expectedPointsGain = 0.0,
+                currentGwGain = 0.0,
+                futureOpportunityGain = 0.0,
+                confidence = ChipConfidence.LOW,
+                primaryReasonAr = "دكة البدلاء تضم أقل من 4 لاعبين. لا يمكن تقييم البينش بوست بدقة.",
+                detailedPointsAr = listOf("قواعد الفانتازي تتطلب احتساب نقاط 4 بدلاء بالكامل.")
+            )
+        }
+
+        // 4. Inspect availability, minutes, starting probability, and fixtures for all 4 bench players
         val weakOrDoubtfulPlayers = mutableListOf<PlayerModel>()
         val zeroFixturePlayers = mutableListOf<PlayerModel>()
         var totalBenchXpts = 0.0
@@ -58,11 +92,14 @@ class BenchBoostAnalyzer(
 
         for (benchPlayer in benchPlayers) {
             val pred = benchPlayer.prediction
-            val basePoints = pred?.expectedPoints ?: (benchPlayer.totalPoints / 30.0).coerceAtLeast(1.5)
             val chance = benchPlayer.availability.chanceOfPlayingNextRound ?: 100
-            val isAvailable = benchPlayer.availability.isAvailable
             val starts = benchPlayer.starts
             val expectedMins = pred?.expectedMinutes ?: (if (starts > 5) 70.0 else 25.0)
+            val startProb = pred?.startProbability ?: (chance / 100.0)
+
+            val isMedicallyAvailable = benchPlayer.availability.isAvailable &&
+                    benchPlayer.availability.status !in listOf("i", "s", "u") &&
+                    chance > 0
 
             val teamFixturesNow = fixtures.filter {
                 it.event == currentGameweek && it.isTeamInvolved(benchPlayer.teamId)
@@ -74,34 +111,57 @@ class BenchBoostAnalyzer(
                 benchDgwPlayerCount++
             }
 
-            val isDoubling = teamFixturesNow.size >= 2
-            val effectivePlayerPoints = if (teamFixturesNow.isEmpty()) {
+            // لا تحتسب نقاط لأي لاعب مصاب أو بدون مباراة في الجولة
+            val effectivePlayerPoints = if (teamFixturesNow.isEmpty() || !isMedicallyAvailable) {
                 0.0
             } else {
-                val multiplier = if (isDoubling) 1.8 else 1.0
-                basePoints * multiplier
+                pred?.expectedPoints ?: run {
+                    val base = (benchPlayer.totalPoints / 30.0).coerceAtLeast(1.0)
+                    base * startProb * (expectedMins / 90.0).coerceIn(0.2, 1.0)
+                }
             }
             totalBenchXpts += effectivePlayerPoints
 
-            // Criterion for weak/doubtful bench player:
-            // - Not fully available
-            // - Chance < 75%
-            // - Injured / Suspended / Unavailable
-            // - Critical risk
-            // - Low expected minutes (< 45 min)
-            val isUnreliable = !isAvailable ||
+            // معايير ضعف البديل أو الشك في مشاركته:
+            val isUnreliable = !isMedicallyAvailable ||
                     chance < 75 ||
-                    benchPlayer.availability.status in listOf("i", "s", "u") ||
                     pred?.riskLevel == RiskLevel.CRITICAL ||
                     expectedMins < 45.0 ||
+                    startProb < 0.70 ||
                     effectivePlayerPoints < 2.0
 
-            if (isUnreliable) {
+            if (isUnreliable && benchPlayer !in weakOrDoubtfulPlayers) {
                 weakOrDoubtfulPlayers.add(benchPlayer)
             }
         }
 
         val currentGwGain = Math.round(totalBenchXpts * 10.0) / 10.0
+
+        // حساب مجموع النقاط المتوقعة للاعبين الـ15 كاملة ومراعاة المباريات والجاهزية الطبية
+        val totalSquad15Xpts = squad.sumOf { p ->
+            val pFixtures = fixtures.filter { it.event == currentGameweek && it.isTeamInvolved(p.teamId) }
+            val isAvail = p.availability.isAvailable &&
+                    p.availability.status !in listOf("i", "s", "u") &&
+                    (p.availability.chanceOfPlayingNextRound ?: 100) > 0
+
+            if (pFixtures.isEmpty() || !isAvail) {
+                0.0
+            } else {
+                p.prediction?.expectedPoints ?: run {
+                    val base = (p.totalPoints / 30.0).coerceAtLeast(1.0)
+                    val sp = (p.availability.chanceOfPlayingNextRound ?: 90) / 100.0
+                    base * sp
+                }
+            }
+        }
+
+        val benchGk = benchPlayers.firstOrNull { it.position == PlayerPosition.GKP }
+        val startingGk = squad.firstOrNull { it.position == PlayerPosition.GKP && it.id != benchGk?.id }
+            ?: squad.firstOrNull { it.position == PlayerPosition.GKP }
+        val isBenchGkReliable = benchGk != null && benchGk.availability.isAvailable &&
+                benchGk.availability.status !in listOf("i", "s", "u") &&
+                (benchGk.prediction?.expectedMinutes ?: 60.0) >= 55.0 &&
+                benchGk.prediction?.riskLevel != RiskLevel.CRITICAL
 
         // 4. Scan future opportunities in the active half
         val halfEndGw = if (half == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks
@@ -201,6 +261,21 @@ class BenchBoostAnalyzer(
             detailedReasons.add("الاستراتيجية الفضلى: تفعيل الوايلد كارد قبل الجولة المزدوجة لتجهيز 15 لاعباً أساسياً ثم تفعيل بينش بوست فوراً.")
         }
 
+        detailedReasons.add("إجمالي النقاط المتوقعة للتشكيلة كاملة (15 لاعباً): %.1f نقطة.".format(Locale.US, totalSquad15Xpts))
+
+        val riskLevel = when {
+            weakOrDoubtfulPlayers.size >= 2 || zeroFixturePlayers.isNotEmpty() -> RiskLevel.CRITICAL
+            weakOrDoubtfulPlayers.size == 1 || !isBenchGkReliable -> RiskLevel.HIGH
+            totalBenchXpts < 14.0 -> RiskLevel.MEDIUM
+            else -> RiskLevel.LOW
+        }
+        val riskAssessmentAr = when (riskLevel) {
+            RiskLevel.LOW -> "مخاطرة منخفضة: جميع عناصر الدكة الأربعة وحارسي المرمى أساسيون وبدقائق مضمونة."
+            RiskLevel.MEDIUM -> "مخاطرة متوسطة: نقاط الدكة مقبولة ولكن يوجد قلق طفيف من مداورة أو صعوبة مواجهة."
+            RiskLevel.HIGH -> "مخاطرة مرتفعة: الحارس البديل أو أحد عناصر الدكة مهدد بعدم المشاركة."
+            RiskLevel.CRITICAL -> "مخاطرة حرجة: وجود إصابات أو غياب مباريات (Blank) يمنع التفعيل تماماً."
+        }
+
         return SingleChipAnalysis(
             chip = ChipType.BENCH_BOOST,
             half = half,
@@ -215,7 +290,10 @@ class BenchBoostAnalyzer(
             primaryReasonAr = primaryReason,
             detailedPointsAr = detailedReasons,
             affectedPlayers = benchPlayers,
-            expirationWarningAr = expirationWarning
+            expirationWarningAr = expirationWarning,
+            riskLevel = riskLevel,
+            riskAssessmentAr = riskAssessmentAr,
+            totalSquad15Points = Math.round(totalSquad15Xpts * 10.0) / 10.0
         )
     }
 

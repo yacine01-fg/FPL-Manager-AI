@@ -4,11 +4,14 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.fplmanagerai.data.chips.ChipSeasonConfig
 import com.fplmanagerai.data.chips.HistoricalChipRepository
+import com.fplmanagerai.data.model.DataSyncStatus
 import com.fplmanagerai.data.model.FixtureModel
+import com.fplmanagerai.data.model.FplAccountProfile
 import com.fplmanagerai.data.model.GameweekModel
 import com.fplmanagerai.data.model.PlayerModel
 import com.fplmanagerai.data.repository.FixtureRepository
 import com.fplmanagerai.data.repository.PlayerAnalysisRepository
+import com.fplmanagerai.data.repository.UserAccountRepository
 import com.fplmanagerai.domain.chips.*
 import com.fplmanagerai.domain.team.OptimizationStrategy
 import com.fplmanagerai.domain.team.SquadOptimizer
@@ -30,12 +33,20 @@ data class ChipStrategyUiState(
     val showSquadPreviewDialog: Boolean = false,
     val previewSquadTitleAr: String = "",
     val previewSquadPlayers: List<PlayerModel> = emptyList(),
-    val isCacheUsed: Boolean = false
+    val isCacheUsed: Boolean = false,
+    val accountProfile: FplAccountProfile? = null,
+    val isAccountLinkingLoading: Boolean = false,
+    val accountLinkingError: String? = null,
+    val showAccountDialog: Boolean = false,
+    val dataSyncStatus: DataSyncStatus = DataSyncStatus.LIVE,
+    val lastUpdatedTimeFormatted: String = "",
+    val lastUpdatedTimestamp: Long = 0L
 )
 
 class ChipStrategyViewModel(
     private val playerRepository: PlayerAnalysisRepository = PlayerAnalysisRepository(),
     private val fixtureRepository: FixtureRepository = FixtureRepository(),
+    private val userAccountRepository: UserAccountRepository = UserAccountRepository(),
     private val config: ChipSeasonConfig = ChipSeasonConfig.DEFAULT_2026_27,
     private val rulesEngine: ChipRulesEngine = ChipRulesEngine(config),
     private val historicalRepository: HistoricalChipRepository = HistoricalChipRepository(),
@@ -57,6 +68,10 @@ class ChipStrategyViewModel(
     private var cachedSquad: List<PlayerModel> = emptyList()
 
     init {
+        val initialProfile = userAccountRepository.getSavedProfile()
+        if (initialProfile != null) {
+            _uiState.update { it.copy(accountProfile = initialProfile) }
+        }
         loadStrategy()
     }
 
@@ -66,6 +81,15 @@ class ChipStrategyViewModel(
             try {
                 // 1. Fetch Players & Gameweek
                 val players = playerRepository.loadAndAnalyze(forceRefresh)
+                if (players.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            errorMessage = "تعذر تحميل بيانات اللاعبين من المصدر."
+                        )
+                    }
+                    return@launch
+                }
                 cachedAllPlayers = players
                 val gw = playerRepository.getCachedGameweek()
                 val currentGwNumber = gw?.id ?: 12
@@ -75,25 +99,57 @@ class ChipStrategyViewModel(
                 val fixtures = fixtureRepository.getFixtures(forceRefresh)
                 cachedFixtures = fixtures
 
-                // 3. Obtain User Squad
-                val squad = squadOptimizer.optimizeSquad(
+                // 3. Sync User Account if linked
+                val savedTeamId = userAccountRepository.getSavedTeamId()
+                var profile = userAccountRepository.getSavedProfile()
+                var currentHistory = userAccountRepository.getSavedChipHistory()
+                    ?: UserChipHistory(isLinkedToAccount = savedTeamId != null, linkedTeamId = savedTeamId, isChipHistoryConfirmed = false)
+
+                if (savedTeamId != null) {
+                    try {
+                        val profRes = userAccountRepository.fetchAccountProfile(savedTeamId)
+                        if (profRes.isSuccess) {
+                            profile = profRes.getOrNull()
+                        }
+                        val histRes = userAccountRepository.fetchChipHistory(savedTeamId, currentGwNumber)
+                        if (histRes.isSuccess) {
+                            currentHistory = histRes.getOrNull() ?: currentHistory
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                // 4. Obtain User Squad (From FPL picks if available, or optimizer)
+                val actualUserSquad = if (savedTeamId != null) {
+                    userAccountRepository.fetchUserSquad(savedTeamId, currentGwNumber, players).getOrNull()
+                } else null
+
+                val squad = actualUserSquad?.totalSquad ?: squadOptimizer.optimizeSquad(
                     allPlayers = players,
-                    budget = 100.0,
+                    budget = profile?.teamValue ?: 100.0,
                     strategy = OptimizationStrategy.BALANCED
                 ).totalSquad
                 cachedSquad = squad
 
-                // 4. Compute Calibration Metrics
+                // 5. Compute Calibration Metrics
                 val metrics = calibrationEngine.computeMetrics()
 
-                // 5. Run Chip Strategy Engine
+                // 6. Run Chip Strategy Engine with verified user history
                 val plan = chipStrategyEngine.evaluateChips(
                     squad = squad,
                     allPlayers = players,
                     fixtures = fixtures,
                     currentGameweek = currentGwNumber,
-                    userHistory = _uiState.value.userHistory
+                    userHistory = currentHistory,
+                    freeTransfers = currentHistory.bankedFreeTransfers,
+                    budget = (profile?.bank ?: 0.0) + (actualUserSquad?.totalCost ?: 100.0)
                 )
+
+                val syncStatus = DataSyncStatus.resolve(
+                    isFromCache = playerRepository.isLastLoadedFromCache,
+                    isError = false,
+                    timestampMillis = playerRepository.lastUpdatedTimestamp
+                )
+                val timeStr = DataSyncStatus.formatRelativeTimeAr(playerRepository.lastUpdatedTimestamp)
 
                 _uiState.update {
                     it.copy(
@@ -101,19 +157,71 @@ class ChipStrategyViewModel(
                         currentGameweek = gw,
                         selectedHalf = currentHalf,
                         portfolioPlan = plan,
+                        userHistory = currentHistory,
                         calibrationMetrics = metrics,
-                        isCacheUsed = playerRepository.isLastLoadedFromCache
+                        isCacheUsed = playerRepository.isLastLoadedFromCache,
+                        accountProfile = profile,
+                        dataSyncStatus = syncStatus,
+                        lastUpdatedTimeFormatted = timeStr,
+                        lastUpdatedTimestamp = playerRepository.lastUpdatedTimestamp
                     )
                 }
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
                         isLoading = false,
+                        dataSyncStatus = DataSyncStatus.ERROR,
                         errorMessage = "تعذر تحميل استراتيجية الشرائح: ${e.localizedMessage ?: "خطأ في الشبكة"}"
                     )
                 }
             }
         }
+    }
+
+    fun setAccountDialogVisible(visible: Boolean) {
+        _uiState.update { it.copy(showAccountDialog = visible, accountLinkingError = null) }
+    }
+
+    fun linkFplAccount(teamId: Int) {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isAccountLinkingLoading = true, accountLinkingError = null) }
+            val result = userAccountRepository.fetchAccountProfile(teamId)
+            result.fold(
+                onSuccess = { profile ->
+                    _uiState.update {
+                        it.copy(
+                            isAccountLinkingLoading = false,
+                            accountProfile = profile,
+                            accountLinkingError = null,
+                            showAccountDialog = false
+                        )
+                    }
+                    loadStrategy(forceRefresh = true)
+                },
+                onFailure = { error ->
+                    _uiState.update {
+                        it.copy(
+                            isAccountLinkingLoading = false,
+                            accountLinkingError = error.localizedMessage ?: "فشل ربط الحساب. يرجى التحقق من صحة Team ID."
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun unlinkFplAccount() {
+        userAccountRepository.unlinkAccount()
+        _uiState.update {
+            it.copy(
+                accountProfile = null,
+                userHistory = UserChipHistory(),
+                portfolioPlan = null,
+                accountLinkingError = null,
+                showAccountDialog = false
+            )
+        }
+        loadStrategy(forceRefresh = true)
     }
 
     fun selectHalf(half: ChipHalf) {

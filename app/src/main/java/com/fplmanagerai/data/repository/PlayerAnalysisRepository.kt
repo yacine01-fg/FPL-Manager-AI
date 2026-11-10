@@ -24,6 +24,7 @@ class PlayerAnalysisRepository(
     private var cachedPlayers: List<PlayerModel>? = null
     private var cachedTeams: Map<Int, TeamModel> = emptyMap()
     private var cachedGameweek: GameweekModel? = null
+    private var cachedNextGameweek: GameweekModel? = null
 
     var isLastLoadedFromCache: Boolean = false
         private set
@@ -134,12 +135,20 @@ class PlayerAnalysisRepository(
 
         // 2. Gameweeks
         val events = json.getAsJsonArray("events").map { it.asJsonObject }
-        val currentEvent = events.firstOrNull { FplDataValidator.safeBoolean(it.get("is_current")) }
-            ?: events.firstOrNull { FplDataValidator.safeBoolean(it.get("is_next")) }
-            ?: events.firstOrNull()
+        val currentEventObj = events.firstOrNull { FplDataValidator.safeBoolean(it.get("is_current")) }
+        val nextEventObj = events.firstOrNull { FplDataValidator.safeBoolean(it.get("is_next")) }
 
-        val gwModel = currentEvent?.let { ev ->
-            GameweekModel(
+        // إذا كانت الجولة الحالية منتهية، فإن الجولة المستهدفة لاتخاذ القرارات هي الجولة القادمة
+        val isCurrentFinished = currentEventObj?.let { FplDataValidator.safeBoolean(it.get("finished")) } ?: false
+        val activeDecisionEvent = if (isCurrentFinished && nextEventObj != null) {
+            nextEventObj
+        } else {
+            currentEventObj ?: nextEventObj ?: events.firstOrNull()
+        }
+
+        fun parseGameweek(ev: JsonObject?): GameweekModel? {
+            if (ev == null) return null
+            return GameweekModel(
                 id = FplDataValidator.safeInt(ev.get("id"), default = 1),
                 name = FplDataValidator.safeString(ev.get("name"), default = "Gameweek 1"),
                 deadlineTime = FplDataValidator.safeString(ev.get("deadline_time")),
@@ -150,8 +159,12 @@ class PlayerAnalysisRepository(
                 averageScore = FplDataValidator.safeNullableInt(ev.get("average_entry_score")),
                 highestScore = FplDataValidator.safeNullableInt(ev.get("highest_score"))
             )
-        } ?: GameweekModel(1, "Gameweek 1", "", isPrevious = false, isCurrent = true, isNext = false, isFinished = false)
+        }
+
+        val gwModel = parseGameweek(activeDecisionEvent)
+            ?: GameweekModel(1, "Gameweek 1", "", isPrevious = false, isCurrent = true, isNext = false, isFinished = false)
         cachedGameweek = gwModel
+        cachedNextGameweek = parseGameweek(nextEventObj)
 
         val currentGwNumber = gwModel.id
 
@@ -258,6 +271,8 @@ class PlayerAnalysisRepository(
     fun getCachedPlayers(): List<PlayerModel> = cachedPlayers ?: emptyList()
 
     fun getCachedGameweek(): GameweekModel? = cachedGameweek
+
+    fun getCachedNextGameweek(): GameweekModel? = cachedNextGameweek
 
     fun getCachedTeams(): Map<Int, TeamModel> = cachedTeams
 

@@ -80,11 +80,29 @@ data class PlayerModel(
     val statistics: PlayerStatistics,
     val availability: PlayerAvailability,
     val upcomingFixtures: List<UpcomingFixture> = emptyList(),
-    val prediction: PlayerPrediction? = null
+    val prediction: PlayerPrediction? = null,
+    val purchasePrice: Double? = null,
+    val sellingPrice: Double? = null,
+    val fplPosition: Int? = null,
+    val fplMultiplier: Int? = null,
+    val isFplCaptain: Boolean = false,
+    val isFplViceCaptain: Boolean = false
 ) {
     val fullName: String
         get() = "$firstName $secondName".trim()
 
     val formattedPrice: String
         get() = "£%.1fm".format(java.util.Locale.UK, price)
+
+    val effectiveSellingPrice: Double
+        get() = sellingPrice ?: price
+
+    val benchOrderLabel: String?
+        get() = when (fplPosition) {
+            12 -> "حارس بديل"
+            13 -> "بديل 1 (أولوية 1)"
+            14 -> "بديل 2 (أولوية 2)"
+            15 -> "بديل 3 (أولوية 3)"
+            else -> null
+        }
 }

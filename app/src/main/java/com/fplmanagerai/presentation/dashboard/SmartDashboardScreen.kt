@@ -24,9 +24,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.fplmanagerai.data.model.FplAccountProfile
 import com.fplmanagerai.data.model.PlayerModel
 import com.fplmanagerai.data.model.PlayerPosition
 import com.fplmanagerai.presentation.components.FixtureChip
+import com.fplmanagerai.presentation.components.FplAccountLinkDialog
+import com.fplmanagerai.presentation.accuracy.PredictionAccuracyScreen
+import com.fplmanagerai.presentation.decision.DecisionIntelligenceScreen
 import com.fplmanagerai.presentation.components.PositionBadge
 import com.fplmanagerai.presentation.components.PredictionCard
 
@@ -37,6 +41,8 @@ fun SmartDashboardScreen(
     modifier: Modifier = Modifier
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    var showAccuracyDialog by remember { mutableStateOf(false) }
+    var showDecisionDialog by remember { mutableStateOf(false) }
 
     CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
         Scaffold(
@@ -53,6 +59,19 @@ fun SmartDashboardScreen(
                         }
                     },
                     actions = {
+                        IconButton(onClick = { viewModel.setAccountDialogVisible(true) }) {
+                            Icon(
+                                imageVector = Icons.Default.AccountCircle,
+                                contentDescription = "ربط وتعديل حساب FPL",
+                                tint = if (state.accountProfile != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+                            )
+                        }
+                        IconButton(onClick = { showDecisionDialog = true }) {
+                            Icon(Icons.Default.AutoAwesome, contentDescription = "قرارات الجولة الذكية", tint = MaterialTheme.colorScheme.primary)
+                        }
+                        IconButton(onClick = { showAccuracyDialog = true }) {
+                            Icon(Icons.Default.Insights, contentDescription = "محرك قياس دقة التوقعات", tint = MaterialTheme.colorScheme.outline)
+                        }
                         IconButton(onClick = { viewModel.loadDashboardData(forceRefresh = true) }) {
                             Icon(Icons.Default.Refresh, contentDescription = "تحديث")
                         }
@@ -91,8 +110,65 @@ fun SmartDashboardScreen(
                     }
 
                     else -> {
-                        DashboardContent(state = state, viewModel = viewModel)
+                        DashboardContent(
+                            state = state,
+                            viewModel = viewModel,
+                            onOpenAccuracy = { showAccuracyDialog = true },
+                            onOpenDecisions = { showDecisionDialog = true }
+                        )
                     }
+                }
+
+                // Decision Intelligence Fullscreen Dialog
+                if (showDecisionDialog) {
+                    androidx.compose.ui.window.Dialog(
+                        onDismissRequest = { showDecisionDialog = false },
+                        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+                    ) {
+                        Surface(modifier = Modifier.fillMaxSize()) {
+                            Box(Modifier.fillMaxSize()) {
+                                DecisionIntelligenceScreen()
+                                IconButton(
+                                    onClick = { showDecisionDialog = false },
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Prediction Accuracy Fullscreen Dialog
+                if (showAccuracyDialog) {
+                    androidx.compose.ui.window.Dialog(
+                        onDismissRequest = { showAccuracyDialog = false },
+                        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)
+                    ) {
+                        Surface(modifier = Modifier.fillMaxSize()) {
+                            Box(Modifier.fillMaxSize()) {
+                                PredictionAccuracyScreen()
+                                IconButton(
+                                    onClick = { showAccuracyDialog = false },
+                                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp)
+                                ) {
+                                    Icon(Icons.Default.Close, contentDescription = "إغلاق")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // FPL Account Link Dialog
+                if (state.showAccountDialog) {
+                    FplAccountLinkDialog(
+                        currentProfile = state.accountProfile,
+                        isLoading = state.isAccountLinkingLoading,
+                        errorMessage = state.accountLinkingError,
+                        onLink = viewModel::linkFplAccount,
+                        onUnlink = viewModel::unlinkFplAccount,
+                        onDismiss = { viewModel.setAccountDialogVisible(false) }
+                    )
                 }
 
                 // Player Detail Bottom Sheet
@@ -121,7 +197,9 @@ fun SmartDashboardScreen(
 @Composable
 fun DashboardContent(
     state: SmartDashboardUiState,
-    viewModel: DashboardViewModel
+    viewModel: DashboardViewModel,
+    onOpenAccuracy: () -> Unit = {},
+    onOpenDecisions: () -> Unit = {}
 ) {
     LazyColumn(
         modifier = Modifier
@@ -130,6 +208,14 @@ fun DashboardContent(
         contentPadding = PaddingValues(vertical = 14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // 0. FPL Account Connection Status Card
+        item {
+            FplAccountStatusCard(
+                profile = state.accountProfile,
+                onOpenLinkDialog = { viewModel.setAccountDialogVisible(true) }
+            )
+        }
+
         // 1. Gameweek & Deadline Countdown Card
         item {
             GameweekCountdownCard(state)
@@ -138,6 +224,16 @@ fun DashboardContent(
         // 2. Financials & Health Overview (Squad Value, Bank, Free Transfers)
         item {
             FinancialsOverviewCard(state)
+        }
+
+        // 3. Decision Intelligence Banner Card
+        item {
+            DecisionIntelligenceBannerCard(onClick = onOpenDecisions)
+        }
+
+        // 4. Prediction Accuracy Banner Card
+        item {
+            PredictionAccuracyBannerCard(onClick = onOpenAccuracy)
         }
 
         // 3. Injury & Availability Alerts Banner
@@ -214,6 +310,146 @@ fun DashboardContent(
                     isBench = true,
                     onClick = { viewModel.selectPlayerForDetails(player) }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+fun FplAccountStatusCard(
+    profile: FplAccountProfile?,
+    onOpenLinkDialog: () -> Unit
+) {
+    if (profile == null) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenLinkDialog() },
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Link,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            "ربط حساب فانتازي الدوري الإنجليزي (FPL)",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "أدخل Team ID لمزامنة تشكيلتك الرسمية، ترتيب الدكة، وأسعار البيع",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                FilledTonalButton(
+                    onClick = onOpenLinkDialog,
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("ربط", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    } else {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenLinkDialog() },
+            shape = RoundedCornerShape(14.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF10B981)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                profile.teamName,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = Color(0xFF10B981).copy(alpha = 0.15f)
+                            ) {
+                                Text(
+                                    "متصل",
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = Color(0xFF10B981),
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                        Text(
+                            "المدرب: ${profile.managerFullName} | ID: ${profile.teamId} | الترتيب: #${profile.overallRank ?: "-"}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                IconButton(onClick = onOpenLinkDialog) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "إدارة الحساب",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         }
     }
@@ -630,6 +866,126 @@ fun DashboardPlayerRow(
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun PredictionAccuracyBannerCard(onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF10B981).copy(alpha = 0.2f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.Insights, contentDescription = null, tint = Color(0xFF10B981), modifier = Modifier.size(20.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "محرك قياس دقة التوقعات",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = Color(0xFF10B981).copy(alpha = 0.15f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                "تحقق علمي",
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF10B981),
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Text(
+                        "فحص MAE وRMSE ونسبة التفوق المضاف على النماذج التبسيطية",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
+        }
+    }
+}
+
+@Composable
+fun DecisionIntelligenceBannerCard(onClick: () -> Unit) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(14.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "قرارات الجولة الذكية",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                            shape = RoundedCornerShape(4.dp)
+                        ) {
+                            Text(
+                                "ذكاء تكتيكي",
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+                    }
+                    Text(
+                        "ما أفضل القرارات لتشكيلتك لهذه الجولة ولماذا؟ مقارنة 5 سيناريوهات",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+            Icon(Icons.Default.ChevronLeft, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
         }
     }
 }

@@ -91,42 +91,97 @@ class FreeHitAnalyzer(
         val fixturesNow = fixtures.filter { it.event == currentGameweek }
         val teamsWithMatchesNow = fixturesNow.flatMap { listOf(it.homeTeamId, it.awayTeamId) }.toSet()
 
+        // Guard against no fixtures data
+        if (fixturesNow.isEmpty() || squad.isEmpty() || allPlayers.isEmpty()) {
+            return SingleChipAnalysis(
+                chip = ChipType.FREE_HIT,
+                half = half,
+                status = currentState,
+                verdict = ChipVerdict.SAVE_FOR_LATER,
+                recommendedGameweek = currentGameweek,
+                alternativeGameweeks = emptyList(),
+                expectedPointsGain = 0.0,
+                currentGwGain = 0.0,
+                futureOpportunityGain = 0.0,
+                confidence = ChipConfidence.LOW,
+                primaryReasonAr = "بيانات الجولة أو التشكيلة غير متوفرة لتحليل الفري هيت.",
+                detailedPointsAr = listOf("تأكد من توفر جدول المباريات واللاعبين في هذه الجولة.")
+            )
+        }
+
         val squadPlayersBlanking = squad.filter { it.teamId !in teamsWithMatchesNow }
         val squadPlayersSidelined = squad.filter {
             it.teamId in teamsWithMatchesNow &&
-                    (!it.availability.isAvailable || it.availability.status in listOf("i", "s", "u"))
+                    (!it.availability.isAvailable || it.availability.status in listOf("i", "s", "u") || (it.availability.chanceOfPlayingNextRound ?: 100) == 0)
         }
         val totalUnavailableCount = squadPlayersBlanking.size + squadPlayersSidelined.size
 
-        // Calculate expected points of Current Squad for this GW (players with no fixture = 0 pts)
-        val currentSquadStarting11 = squad.take(11)
-        val currentSquadExpectedPts = currentSquadStarting11.sumOf { p ->
-            if (p.teamId !in teamsWithMatchesNow || !p.availability.isAvailable) 0.0
-            else p.prediction?.expectedPoints ?: 3.5
+        // Calculate expected points of Current Squad for this GW (players with no fixture or injured = 0 pts)
+        val currentStarting11 = if (squad.size >= 15) {
+            try {
+                squadOptimizer.optimizeStartingLineup(squad).starting11
+            } catch (_: Exception) {
+                squad.take(11)
+            }
+        } else {
+            squad.take(11)
         }
+
+        val currentCaptainCandidate = currentStarting11.maxByOrNull { p ->
+            if (p.teamId !in teamsWithMatchesNow || !p.availability.isAvailable || p.availability.status in listOf("i", "s", "u")) 0.0
+            else p.prediction?.expectedPoints ?: 0.0
+        }
+        val currentCaptainBonus = currentCaptainCandidate?.let {
+            if (it.teamId in teamsWithMatchesNow && it.availability.isAvailable && it.availability.status !in listOf("i", "s", "u")) {
+                it.prediction?.expectedPoints ?: 0.0
+            } else 0.0
+        } ?: 0.0
+
+        val currentSquadExpectedPts = currentStarting11.sumOf { p ->
+            if (p.teamId !in teamsWithMatchesNow || !p.availability.isAvailable || p.availability.status in listOf("i", "s", "u")) 0.0
+            else p.prediction?.expectedPoints ?: 0.0
+        } + currentCaptainBonus
 
         // 5. Build temporary 15-player Free Hit Squad targeting active players with high xPts
         val eligibleActivePlayers = allPlayers.filter { p ->
-            p.teamId in teamsWithMatchesNow && p.availability.isAvailable && p.prediction?.riskLevel != RiskLevel.CRITICAL
+            p.teamId in teamsWithMatchesNow &&
+                    p.availability.isAvailable &&
+                    p.availability.status !in listOf("i", "s", "u") &&
+                    (p.availability.chanceOfPlayingNextRound ?: 100) >= 50 &&
+                    p.prediction?.riskLevel != RiskLevel.CRITICAL
         }
 
-        val freeHitOptimized = if (eligibleActivePlayers.size >= 15) {
-            squadOptimizer.optimizeSquad(
-                allPlayers = eligibleActivePlayers,
-                budget = budget,
-                strategy = OptimizationStrategy.MAX_EXPECTED_POINTS,
-                horizon = 1
-            )
+        val gksCount = eligibleActivePlayers.count { it.position == com.fplmanagerai.data.model.PlayerPosition.GKP }
+        val defsCount = eligibleActivePlayers.count { it.position == com.fplmanagerai.data.model.PlayerPosition.DEF }
+        val midsCount = eligibleActivePlayers.count { it.position == com.fplmanagerai.data.model.PlayerPosition.MID }
+        val fwdsCount = eligibleActivePlayers.count { it.position == com.fplmanagerai.data.model.PlayerPosition.FWD }
+        val canBuildValidSquad = gksCount >= 2 && defsCount >= 5 && midsCount >= 5 && fwdsCount >= 3
+
+        val freeHitOptimized = if (canBuildValidSquad) {
+            try {
+                squadOptimizer.optimizeSquad(
+                    allPlayers = eligibleActivePlayers,
+                    budget = budget,
+                    strategy = OptimizationStrategy.MAX_EXPECTED_POINTS,
+                    horizon = 1
+                )
+            } catch (_: Exception) {
+                null
+            }
         } else {
             null
         }
 
         val freeHitExpectedPts = freeHitOptimized?.let {
             it.projectedStartingPoints + it.projectedCaptainPoints
-        } ?: (currentSquadExpectedPts + 25.0)
+        } ?: currentSquadExpectedPts
 
-        // Mathematical calculation: Difference between optimized temporary squad and existing squad for same GW
-        val currentGwGain = Math.round((freeHitExpectedPts - currentSquadExpectedPts).coerceAtLeast(0.0) * 10.0) / 10.0
+        // الفارق النقطي الحقيقي المحسوب بدقة، وبلا افتراض أرقام وهمية عند تعذر بناء التشكيلة
+        val currentGwGain = if (freeHitOptimized != null) {
+            Math.round((freeHitExpectedPts - currentSquadExpectedPts).coerceAtLeast(0.0) * 10.0) / 10.0
+        } else {
+            0.0
+        }
 
         // 6. Detect future major Blank Gameweeks within this half
         val halfEndGw = if (half == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks
@@ -169,15 +224,21 @@ class FreeHitAnalyzer(
 
         // 8. Decision Logic:
         val isCriticalBlankForUser = totalUnavailableCount >= 4 || squadPlayersBlanking.size >= 3
-        val shouldActivateNow = (isCriticalBlankForUser && currentGwGain >= 18.0) ||
-                (squadPlayersBlanking.size >= 5) ||
+        val shouldActivateNow = freeHitOptimized != null && (
+                (isCriticalBlankForUser && currentGwGain >= 18.0) ||
+                (squadPlayersBlanking.size >= 5 && currentGwGain >= 15.0) ||
                 (isSet1ExpiryApproaching && currentGwGain >= 14.0)
+        )
 
         val verdict: ChipVerdict
         val recommendedGw: Int
         val confidence: ChipConfidence
         val primaryReason: String
         val detailedReasons = mutableListOf<String>()
+
+        if (freeHitOptimized == null && !canBuildValidSquad) {
+            detailedReasons.add("لا تتوفر قاعدة كافية من اللاعبين النشطين في هذه الجولة لبناء تشكيلة فري هيت كاملة من 15 لاعباً.")
+        }
 
         if (shouldActivateNow) {
             verdict = ChipVerdict.ACTIVATE_NOW
@@ -217,6 +278,17 @@ class FreeHitAnalyzer(
             detailedReasons.add("عدد اللاعبين المتاحين في تشكيلتك حالياً كافٍ لتفادي حرق الشريحة مبكراً.")
         }
 
+        val riskLevel = when {
+            totalUnavailableCount >= 5 -> RiskLevel.LOW
+            totalUnavailableCount in 3..4 -> RiskLevel.MEDIUM
+            else -> RiskLevel.HIGH
+        }
+        val riskAssessmentAr = when {
+            totalUnavailableCount >= 5 -> "مخاطرة تفعيل منخفضة: الفريق الحالي يعاني من نقص حاد وتفعيل الشريحة ينقذ الجولة تماماً."
+            totalUnavailableCount in 3..4 -> "مخاطرة معتدلة: وجود عدة غيابات قد يبرر التفعيل، لكن يُفضل دراسة الحلول بالانتقالات أولاً."
+            else -> "مخاطرة تفعيل مرتفعة: تشكيلتك الحالية جاهزة وتفعيل الشريحة الآن هدر لفرص الجولات الفارغة الكبرى."
+        }
+
         return SingleChipAnalysis(
             chip = ChipType.FREE_HIT,
             half = half,
@@ -232,7 +304,9 @@ class FreeHitAnalyzer(
             detailedPointsAr = detailedReasons,
             affectedPlayers = squadPlayersBlanking + squadPlayersSidelined,
             temporarySquad = freeHitOptimized?.totalSquad,
-            expirationWarningAr = expirationWarning
+            expirationWarningAr = expirationWarning,
+            riskLevel = riskLevel,
+            riskAssessmentAr = riskAssessmentAr
         )
     }
 }

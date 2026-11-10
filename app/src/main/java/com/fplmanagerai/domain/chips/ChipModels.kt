@@ -1,6 +1,7 @@
 package com.fplmanagerai.domain.chips
 
 import com.fplmanagerai.data.model.PlayerModel
+import com.fplmanagerai.data.model.RiskLevel
 
 /**
  * Official FPL Chip Types
@@ -90,7 +91,8 @@ enum class ChipStatus(val titleAr: String) {
     PENDING("معلّق / محدد للجولة القادمة"),
     ACTIVE_THIS_GW("نشط في الجولة الحالية"),
     USED("تم استخدامه مسبقاً"),
-    EXPIRED("منتهي الصلاحية")
+    EXPIRED("منتهي الصلاحية"),
+    UNKNOWN("غير مؤكد (بانتظار مزامنة الحساب)")
 }
 
 /**
@@ -143,6 +145,21 @@ data class ChipValidationResult(
 )
 
 /**
+ * قرار موحد وشامل لكل شريحة للإظهار المباشر والتكامل
+ */
+data class UnifiedChipDecision(
+    val chip: ChipType,
+    val shouldActivateNow: Boolean,
+    val recommendedGameweek: Int,
+    val expectedGain: Double,
+    val confidence: ChipConfidence,
+    val riskLevel: RiskLevel,
+    val riskAssessmentAr: String,
+    val recommendationReasonAr: String,
+    val currentGwGain: Double = expectedGain
+)
+
+/**
  * Comprehensive analysis result for a single FPL chip
  */
 data class SingleChipAnalysis(
@@ -163,13 +180,36 @@ data class SingleChipAnalysis(
     val temporarySquad: List<PlayerModel>? = null,
     val arbitrationNoteAr: String? = null,
     val expirationWarningAr: String? = null,
-    val isConfirmedFixture: Boolean = true
+    val isConfirmedFixture: Boolean = true,
+    val riskLevel: RiskLevel = RiskLevel.LOW,
+    val riskAssessmentAr: String = "",
+    val totalSquad15Points: Double? = null
 ) {
     val roundedExpectedGain: Double
         get() = Math.round(expectedPointsGain * 10.0) / 10.0
 
     val isRecommendedNow: Boolean
-        get() = verdict == ChipVerdict.ACTIVATE_NOW
+        get() = verdict == ChipVerdict.ACTIVATE_NOW && (status == ChipStatus.AVAILABLE || status == ChipStatus.PENDING)
+
+    val unifiedDecision: UnifiedChipDecision
+        get() = UnifiedChipDecision(
+            chip = chip,
+            shouldActivateNow = isRecommendedNow,
+            recommendedGameweek = recommendedGameweek,
+            expectedGain = roundedExpectedGain,
+            confidence = confidence,
+            riskLevel = riskLevel,
+            riskAssessmentAr = riskAssessmentAr.ifBlank {
+                when (riskLevel) {
+                    RiskLevel.LOW -> "مخاطر منخفضة واستقرار عالٍ في التوقعات"
+                    RiskLevel.MEDIUM -> "مخاطر متوسطة تتطلب متابعة المؤتمرات الصحفية"
+                    RiskLevel.HIGH -> "مخاطر مرتفعة بسبب احتمالية المداورة أو ضغط المباريات"
+                    RiskLevel.CRITICAL -> "مخاطر حرجة تمنع الاستخدام حالياً"
+                }
+            },
+            recommendationReasonAr = primaryReasonAr,
+            currentGwGain = Math.round(currentGwGain * 10.0) / 10.0
+        )
 }
 
 /**
@@ -194,7 +234,11 @@ data class UserChipHistory(
     val activeChipGameweek: Int? = null,
     val lastUsedFreeHitGw: Int? = null,
     // Track banked free transfers (1 to 5)
-    val bankedFreeTransfers: Int = 1
+    val bankedFreeTransfers: Int = 1,
+    // FPL Account Linking integration
+    val isLinkedToAccount: Boolean = false,
+    val linkedTeamId: Int? = null,
+    val isChipHistoryConfirmed: Boolean = false
 ) {
     /**
      * Determines the state of a specific chip instance given the current gameweek
@@ -222,18 +266,33 @@ data class UserChipHistory(
         }
 
         // Check if used
-        val isUsedInHalf = if (half == ChipHalf.FIRST_HALF) {
-            chip in set1UsedChips || (chip == ChipType.WILDCARD && firstHalfWildcardUsed) || (chip in usedChips && currentGw <= 19)
-        } else {
-            chip in set2UsedChips || (chip == ChipType.WILDCARD && secondHalfWildcardUsed) || (chip in usedChips && currentGw > 19)
+        val isUsed = when (chip) {
+            ChipType.WILDCARD -> {
+                if (half == ChipHalf.FIRST_HALF) {
+                    firstHalfWildcardUsed || chip in set1UsedChips
+                } else {
+                    secondHalfWildcardUsed || chip in set2UsedChips
+                }
+            }
+            ChipType.TRIPLE_CAPTAIN,
+            ChipType.BENCH_BOOST,
+            ChipType.FREE_HIT -> {
+                // قاعدة FPL الرسمية: استخدام واحد فقط طوال الموسم
+                chip in usedChips || chip in set1UsedChips || chip in set2UsedChips
+            }
         }
-        if (isUsedInHalf) {
+        if (isUsed) {
             return ChipStatus.USED
         }
 
         // Check expiration for Set 1 (First Half chips expire after GW19 deadline)
         if (half == ChipHalf.FIRST_HALF && currentGw > 19) {
             return ChipStatus.EXPIRED
+        }
+
+        // إذا لم يكن سجل الشرائح مؤكداً من خوادم FPL أو التخزين الموثق، تظهر كغير مؤكدة
+        if (!isChipHistoryConfirmed && chip !in usedChips) {
+            return ChipStatus.UNKNOWN
         }
 
         return ChipStatus.AVAILABLE
@@ -260,4 +319,7 @@ data class ChipPortfolioPlan(
     val recommendedSeasonSchedule: List<Pair<Int, ChipType>>,
     val userChipHistory: UserChipHistory,
     val preservedBankedTransfers: Int = 1
-)
+) {
+    val unifiedDecisions: List<UnifiedChipDecision>
+        get() = chipAnalyses.values.map { it.unifiedDecision }
+}

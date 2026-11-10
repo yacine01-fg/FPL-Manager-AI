@@ -6,6 +6,7 @@ import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.GET
+import retrofit2.http.Path
 import java.util.concurrent.TimeUnit
 
 interface FplApi {
@@ -14,6 +15,23 @@ interface FplApi {
 
     @GET("fixtures/")
     suspend fun getFixtures(): JsonArray
+
+    @GET("entry/{team_id}/")
+    suspend fun getEntry(@Path("team_id") teamId: Int): JsonObject
+
+    @GET("entry/{team_id}/history/")
+    suspend fun getEntryHistory(@Path("team_id") teamId: Int): JsonObject
+
+    @GET("entry/{team_id}/event/{event}/picks/")
+    suspend fun getEntryPicks(
+        @Path("team_id") teamId: Int,
+        @Path("event") gameweek: Int
+    ): JsonObject
+
+    @GET("event/{event}/live/")
+    suspend fun getEventLive(
+        @Path("event") gameweek: Int
+    ): JsonObject
 
     companion object {
         private const val BASE_URL = "https://fantasy.premierleague.com/api/"

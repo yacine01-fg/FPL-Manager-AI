@@ -48,20 +48,40 @@ class TripleCaptainAnalyzer(
             )
         }
 
-        // 2. Select top captain candidate in the squad
-        val squadCaptainSelection = captainSelector.selectCaptain(squad)
+        // 2. Data Validation: Guard against missing squad or player data
+        if (squad.isEmpty() && allPlayers.isEmpty()) {
+            return SingleChipAnalysis(
+                chip = ChipType.TRIPLE_CAPTAIN,
+                half = half,
+                status = currentState,
+                verdict = ChipVerdict.SAVE_FOR_LATER,
+                recommendedGameweek = currentGameweek,
+                alternativeGameweeks = emptyList(),
+                expectedPointsGain = 0.0,
+                currentGwGain = 0.0,
+                futureOpportunityGain = 0.0,
+                confidence = ChipConfidence.LOW,
+                primaryReasonAr = "بيانات اللاعبين والتشكيلة غير كافية لتحليل الكابتن.",
+                detailedPointsAr = listOf("تأكد من تحميل بيانات التشكيلة واللاعبين قبل تحليل الشريحة.")
+            )
+        }
+
+        // 3. Select top captain candidate in the squad
+        val poolForCaptain = if (squad.isNotEmpty()) squad else allPlayers
+        val squadCaptainSelection = captainSelector.selectCaptain(poolForCaptain)
         val bestSquadCandidate = squadCaptainSelection.captain
 
-        val allCaptainSelection = captainSelector.selectCaptain(allPlayers)
-        val benchmarkCandidate = allCaptainSelection.captain
+        val benchmarkCandidate = if (allPlayers.isNotEmpty()) {
+            captainSelector.selectCaptain(allPlayers).captain
+        } else bestSquadCandidate
 
-        val chosenCaptain = if ((bestSquadCandidate.prediction?.expectedPoints ?: 0.0) >= 5.0) {
+        val chosenCaptain = if ((bestSquadCandidate.prediction?.expectedPoints ?: 0.0) >= 5.0 || squad.isNotEmpty()) {
             bestSquadCandidate
         } else {
             benchmarkCandidate
         }
 
-        // 3. Inspect current Gameweek for Double Gameweek (DGW) status
+        // 4. Inspect current Gameweek for Double Gameweek (DGW) or Blank status
         val teamFixturesNow = fixtures.filter {
             it.event == currentGameweek && it.isTeamInvolved(chosenCaptain.teamId)
         }
@@ -69,37 +89,39 @@ class TripleCaptainAnalyzer(
         val isCurrentBlank = teamFixturesNow.isEmpty()
         val isConfirmedNow = teamFixturesNow.isNotEmpty()
 
-        // Calculate expected points for current GW
-        val basePrediction = chosenCaptain.prediction
-        val singleMatchXpts = basePrediction?.expectedPoints ?: (chosenCaptain.totalPoints / 25.0).coerceAtLeast(4.0)
-        val startProb = basePrediction?.startProbability ?: (chosenCaptain.availability.chanceOfPlayingNextRound?.toDouble()?.div(100.0) ?: 0.90)
-        val expectedMinutes = basePrediction?.expectedMinutes ?: 80.0
-
         val nextFixture = chosenCaptain.upcomingFixtures.firstOrNull { it.gameweek == currentGameweek }
         val fdr = nextFixture?.difficulty ?: 3
         val isHome = nextFixture?.isHome ?: true
 
-        // Rotation & difficulty risk check: DO NOT force activation merely because DGW exists
+        val basePrediction = chosenCaptain.prediction
+        val expectedMinutes = basePrediction?.expectedMinutes ?: (if (chosenCaptain.starts > 5) 80.0 else 30.0)
+        val startProb = basePrediction?.startProbability ?: ((chosenCaptain.availability.chanceOfPlayingNextRound ?: 90) / 100.0)
+
+        // Rotation & difficulty risk check
         val averageDgwFdr = if (teamFixturesNow.size >= 2) {
             teamFixturesNow.map { it.getDifficulty(chosenCaptain.teamId) }.average()
         } else {
             fdr.toDouble()
         }
-        val isHarshDgw = isCurrentDgw && (averageDgwFdr >= 4.5 || expectedMinutes < 55.0 || chosenCaptain.prediction?.riskLevel == RiskLevel.CRITICAL)
+        val isHarshDgw = isCurrentDgw && (averageDgwFdr >= 4.5 || expectedMinutes < 60.0 ||
+                chosenCaptain.prediction?.riskLevel == RiskLevel.CRITICAL || chosenCaptain.prediction?.riskLevel == RiskLevel.HIGH)
 
-        // Effective Current Expected Points:
-        // Incremental expected value compared with normal captaincy:
-        // Normal captain gives 2x xPts. Triple Captain gives 3x xPts.
-        // Incremental value added is exactly 1x xPts (Do not count ordinary captain multiplier twice!)
-        val currentXptsMultiplier = if (isCurrentDgw && !isHarshDgw) 1.85 else 1.0
-        val effectiveCurrentXpts = if (isCurrentBlank) {
+        // التحقق من الجاهزية الطبية: استبعاد أي لاعب مصاب أو موقوف رسمياً
+        val isMedicallyAvailable = chosenCaptain.availability.isAvailable &&
+                chosenCaptain.availability.status !in listOf("i", "s", "u") &&
+                (chosenCaptain.availability.chanceOfPlayingNextRound ?: 100) > 0
+
+        // العائد الإضافي الصافي من التريبل كابتن = 1x نقاط الكابتن المتوقعة الأساسية للجولة كاملة
+        // محرك التوقعات (PredictionEngine) يجمع بالفعل نقاط مباريات الجولة المزدوجة ومعدل الدقائق واحتمال المشاركة
+        val effectiveCurrentXpts = if (isCurrentBlank || !isMedicallyAvailable) {
             0.0
         } else {
-            val minuteFactor = (expectedMinutes / 90.0).coerceIn(0.4, 1.0)
-            singleMatchXpts * currentXptsMultiplier * startProb * minuteFactor
+            basePrediction?.expectedPoints ?: run {
+                val base = (chosenCaptain.totalPoints / 25.0).coerceAtLeast(2.0)
+                base * startProb * (expectedMinutes / 90.0).coerceIn(0.2, 1.0)
+            }
         }
 
-        // Exact incremental points added by Triple Captain = 1x extra captain points
         val currentGwGain = Math.round(effectiveCurrentXpts * 10.0) / 10.0
 
         // 4. Scan future opportunities within the half boundary
@@ -154,15 +176,23 @@ class TripleCaptainAnalyzer(
         // a) Imminent expiration: GW19 in first half -> MUST activate to avoid total loss
         // b) Prime DGW for elite captain WITHOUT harsh rotation/difficulty risks
         // c) Outstanding SGW late in half where no better DGW is expected
-        val hasPrimeConditionsNow = (isCurrentDgw && !isHarshDgw && currentGwGain >= 10.0) ||
+        val isCaptainRiskAcceptable = chosenCaptain.prediction?.riskLevel != RiskLevel.HIGH && chosenCaptain.prediction?.riskLevel != RiskLevel.CRITICAL
+        val isCaptainScoreViable = squadCaptainSelection.isTripleCaptainViable || (isCaptainRiskAcceptable && currentGwGain >= 9.5)
+
+        val hasPrimeConditionsNow = ((isCurrentDgw && !isHarshDgw && currentGwGain >= 10.0) ||
                 (isSet1ExpiryApproaching && currentGwGain >= 6.5) ||
-                (fdr <= 2 && isHome && currentGwGain >= 9.5 && confirmedFutureDgws.isEmpty() && projectedFutureDgws.isEmpty())
+                (fdr <= 2 && isHome && currentGwGain >= 9.5 && confirmedFutureDgws.isEmpty() && projectedFutureDgws.isEmpty())) &&
+                (isCaptainScoreViable || isSet1ExpiryApproaching)
 
         val verdict: ChipVerdict
         val recommendedGw: Int
         val confidence: ChipConfidence
         val primaryReason: String
         val detailedReasons = mutableListOf<String>()
+
+        if (squadCaptainSelection.tripleCaptainReasonAr.isNotBlank()) {
+            detailedReasons.add(squadCaptainSelection.tripleCaptainReasonAr)
+        }
 
         if (hasPrimeConditionsNow) {
             verdict = ChipVerdict.ACTIVATE_NOW
@@ -213,6 +243,20 @@ class TripleCaptainAnalyzer(
             }
         }
 
+        val captainRisk = chosenCaptain.prediction?.riskLevel ?: RiskLevel.LOW
+        val riskLevel = when {
+            isHarshDgw || captainRisk == RiskLevel.HIGH -> RiskLevel.HIGH
+            captainRisk == RiskLevel.CRITICAL || isCurrentBlank -> RiskLevel.CRITICAL
+            startProb < 0.85 || expectedMinutes < 70.0 || averageDgwFdr >= 3.6 -> RiskLevel.MEDIUM
+            else -> RiskLevel.LOW
+        }
+        val riskAssessmentAr = when (riskLevel) {
+            RiskLevel.LOW -> "مخاطرة منخفضة: اللاعب أساسي مضمون في لقاءات مواتية جداً."
+            RiskLevel.MEDIUM -> "مخاطرة متوسطة: مواجهة متوسطة الصعوبة أو تدوير طفيف محتمل."
+            RiskLevel.HIGH -> "مخاطرة مرتفعة: صعوبة جدول أو احتمالية تبديل مبكر ومداورة."
+            RiskLevel.CRITICAL -> "مخاطرة حرجة: غياب أو إيقاف أو انعدام تام للمباريات."
+        }
+
         return SingleChipAnalysis(
             chip = ChipType.TRIPLE_CAPTAIN,
             half = half,
@@ -228,7 +272,9 @@ class TripleCaptainAnalyzer(
             detailedPointsAr = detailedReasons,
             targetPlayer = chosenCaptain,
             expirationWarningAr = expirationWarning,
-            isConfirmedFixture = isConfirmedNow
+            isConfirmedFixture = isConfirmedNow,
+            riskLevel = riskLevel,
+            riskAssessmentAr = riskAssessmentAr
         )
     }
 }

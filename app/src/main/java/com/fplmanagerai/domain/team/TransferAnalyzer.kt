@@ -96,20 +96,46 @@ class TransferAnalyzer {
         // 3. Evaluate Combinations & Keep vs Sell Analysis
         var transferIndex = 0
         for (outPlayer in sellCandidates.take(5)) {
-            val maxSpend = outPlayer.price + bankBudget
+            // استخدام سعر البيع الفعلي (effectiveSellingPrice) وليس سعر السوق لضمان دقة الميزانية
+            val maxSpend = outPlayer.effectiveSellingPrice + bankBudget
             val eligibleReplacements = buyCandidates
-                .filter { it.position == outPlayer.position && it.price <= maxSpend + 0.001 }
+                .filter { candidate ->
+                    // 1. توافق المركز
+                    candidate.position == outPlayer.position &&
+                    // 2. الميزانية الفعلية المتاحة
+                    candidate.price <= maxSpend + 0.001 &&
+                    // 3. قاعدة الحد الأقصى: لا يتجاوز 3 لاعبين من نفس النادي
+                    (if (outPlayer.teamId == candidate.teamId) {
+                        currentSquad.count { it.teamId == candidate.teamId } <= 3
+                    } else {
+                        currentSquad.count { it.teamId == candidate.teamId } < 3
+                    })
+                }
                 .take(3)
 
             val bestReplacement = eligibleReplacements.firstOrNull()
             if (bestReplacement != null) {
                 val outXptsSingle = outPlayer.prediction?.expectedPoints ?: 0.0
                 val inXptsSingle = bestReplacement.prediction?.expectedPoints ?: 0.0
-                val outXptsTotal = outXptsSingle * horizon
-                val inXptsTotal = inXptsSingle * horizon
+
+                // حساب النقاط على أفق 5 جولات الفعلي بالاعتماد على توقعات كل جولة (DGW, BGW, FDR)
+                val outHorizon = outPlayer.prediction?.horizonPredictions
+                val inHorizon = bestReplacement.prediction?.horizonPredictions
+                val outXptsTotal = if (!outHorizon.isNullOrEmpty()) {
+                    outHorizon.take(horizon).sumOf { it.expectedPoints }
+                } else {
+                    val base = if (!outPlayer.availability.isAvailable) 0.0 else outXptsSingle
+                    base * horizon
+                }
+                val inXptsTotal = if (!inHorizon.isNullOrEmpty()) {
+                    inHorizon.take(horizon).sumOf { it.expectedPoints }
+                } else {
+                    inXptsSingle * horizon
+                }
 
                 val hitCost = if (transferIndex >= safeFreeTransfers) 4 else 0
-                val netAdvantage = (inXptsTotal - outXptsTotal) - hitCost
+                val totalHorizonDelta = inXptsTotal - outXptsTotal
+                val netAdvantage = totalHorizonDelta - hitCost
 
                 val shouldMove = netAdvantage > 1.2 || !outPlayer.availability.isAvailable
 
@@ -136,11 +162,11 @@ class TransferAnalyzer {
 
                 // Add to suggestions if positive
                 val deltaXpts = inXptsSingle - outXptsSingle
-                if (deltaXpts > 0.6) {
+                if (deltaXpts > 0.6 || totalHorizonDelta > 2.0) {
                     val explanation = buildString {
                         append("استبدال ${outPlayer.webName} (${outPlayer.availability.labelAr}) ")
                         append("بالمتألق ${bestReplacement.webName} ")
-                        append("(فارق نقاط: +%.1f في الجولة)".format(java.util.Locale.US, deltaXpts))
+                        append("(فارق نقاط: +%.1f في الجولة، +%.1f على أفق $horizon جولات)".format(java.util.Locale.US, deltaXpts, totalHorizonDelta))
                         if (hitCost > 0) append(" [خصم نقاط -$hitCost]")
                     }
 
@@ -148,9 +174,9 @@ class TransferAnalyzer {
                         TransferSuggestion(
                             playerOut = outPlayer,
                             playerIn = bestReplacement,
-                            netCost = Math.round((bestReplacement.price - outPlayer.price) * 10.0) / 10.0,
+                            netCost = Math.round((bestReplacement.price - outPlayer.effectiveSellingPrice) * 10.0) / 10.0,
                             pointGainPerGw = Math.round(deltaXpts * 10.0) / 10.0,
-                            totalProjectedGain = Math.round((deltaXpts * horizon) * 10.0) / 10.0,
+                            totalProjectedGain = Math.round(totalHorizonDelta * 10.0) / 10.0,
                             hitPenalty = hitCost,
                             netExpectedGain = Math.round(netAdvantage * 10.0) / 10.0,
                             explanationAr = explanation

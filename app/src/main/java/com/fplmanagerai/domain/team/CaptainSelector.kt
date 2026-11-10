@@ -1,6 +1,8 @@
 package com.fplmanagerai.domain.team
 
 import com.fplmanagerai.data.model.PlayerModel
+import com.fplmanagerai.domain.analysis.CaptaincyAnalyzer
+import com.fplmanagerai.domain.analysis.CaptaincyRecommendation
 
 data class CaptainCandidate(
     val player: PlayerModel,
@@ -16,53 +18,75 @@ data class CaptainSelectionResult(
     val captain: PlayerModel,
     val viceCaptain: PlayerModel,
     val projectedCaptainPoints: Double,
-    val topCandidates: List<CaptainCandidate>
+    val topCandidates: List<CaptainCandidate>,
+    val recommendation: CaptaincyRecommendation? = null,
+    val summaryAr: String = "",
+    val isTripleCaptainViable: Boolean = false,
+    val tripleCaptainReasonAr: String = ""
 )
 
-class CaptainSelector {
+/**
+ * واجهة موحدة لاختيار الكابتن ونائب الكابتن.
+ * تفوض الحساب والتقييم كلياً إلى CaptaincyAnalyzer كمصدر موحد للحقيقة (Single Source of Truth)
+ * مع الحفاظ على التوافق التام مع SquadOptimizer و ViewModels وباقي شاشات التطبيق.
+ */
+class CaptainSelector(
+    private val captaincyAnalyzer: CaptaincyAnalyzer = CaptaincyAnalyzer()
+) {
 
     fun selectCaptain(starting11: List<PlayerModel>): CaptainSelectionResult {
-        require(starting11.size >= 2) { "Starting 11 must contain at least 2 players to choose Captain and Vice-Captain" }
+        require(starting11.isNotEmpty()) { "Starting 11 must contain at least 1 player to choose Captain and Vice-Captain" }
 
-        val candidates = starting11.map { player ->
-            val xpts = player.prediction?.expectedPoints ?: (player.totalPoints / 10.0)
-            val form = player.form
-            val isHome = player.upcomingFixtures.firstOrNull()?.isHome ?: true
-            val fixtureDifficulty = player.upcomingFixtures.firstOrNull()?.difficulty ?: 3
-
-            // Ceiling score based on attacking xG/xA and explosive potential
-            val stats = player.statistics
-            val explosiveFactor = (stats.goals * 1.2 + stats.assists * 0.8) / (player.minutesPlayed.coerceAtLeast(90) / 90.0)
-            val ceiling = xpts * 1.3 + explosiveFactor * 0.5 + (if (isHome) 0.5 else -0.3)
-
-            val reason = buildString {
-                append("نقاط متوقعة: %.1f".format(java.util.Locale.US, xpts))
-                if (isHome) append(" • مباراة على أرضه") else append(" • مباراة خارج الأرض")
-                append(" (صعوبة FDR: $fixtureDifficulty)")
-            }
-
-            CaptainCandidate(
-                player = player,
-                expectedPoints = Math.round(xpts * 10.0) / 10.0,
-                predictedCaptainPoints = Math.round(xpts * 2.0 * 10.0) / 10.0,
-                actualPoints = player.totalPoints,
-                actualCaptainPoints = player.totalPoints * 2,
-                ceilingScore = Math.round(ceiling * 10.0) / 10.0,
-                recommendationReasonAr = reason
+        if (starting11.size == 1) {
+            val p = starting11[0]
+            val xpts = p.prediction?.expectedPoints ?: (p.totalPoints / 10.0)
+            return CaptainSelectionResult(
+                captain = p,
+                viceCaptain = p,
+                projectedCaptainPoints = Math.round(xpts * 2.0 * 10.0) / 10.0,
+                topCandidates = emptyList()
             )
-        }.sortedWith(
-            compareByDescending<CaptainCandidate> { it.expectedPoints }
-                .thenByDescending { it.ceilingScore }
-        )
+        }
 
-        val captain = candidates[0].player
-        val viceCaptain = candidates.getOrNull(1)?.player ?: candidates[0].player
+        // التفويض للمحرك المركزي CaptaincyAnalyzer
+        val recommendation = captaincyAnalyzer.recommend(starting11)
+
+        val captain = recommendation.captain?.let { cap ->
+            starting11.firstOrNull { it.id == cap.playerId }
+        } ?: starting11[0]
+
+        // التأكد التام من أن نائب الكابتن مختلف عن الكابتن وضمن الأساسيين
+        val viceCaptain = recommendation.viceCaptain?.let { vc ->
+            starting11.firstOrNull { it.id == vc.playerId && it.id != captain.id }
+        } ?: starting11.firstOrNull { it.id != captain.id } ?: starting11.getOrElse(1) { captain }
+
+        val projectedCapPoints = recommendation.captain?.captainPoints
+            ?: Math.round((captain.prediction?.expectedPoints ?: (captain.totalPoints / 10.0)) * 2.0 * 10.0) / 10.0
+
+        val mappedCandidates = (listOfNotNull(recommendation.captain, recommendation.viceCaptain) + recommendation.alternatives)
+            .distinctBy { it.playerId }
+            .mapNotNull { cand ->
+                val player = starting11.firstOrNull { it.id == cand.playerId } ?: return@mapNotNull null
+                CaptainCandidate(
+                    player = player,
+                    expectedPoints = cand.expectedPoints,
+                    predictedCaptainPoints = cand.captainPoints,
+                    actualPoints = player.totalPoints,
+                    actualCaptainPoints = player.totalPoints * 2,
+                    ceilingScore = cand.captaincyScore,
+                    recommendationReasonAr = cand.reasonAr
+                )
+            }
 
         return CaptainSelectionResult(
             captain = captain,
             viceCaptain = viceCaptain,
-            projectedCaptainPoints = candidates[0].predictedCaptainPoints,
-            topCandidates = candidates.take(5)
+            projectedCaptainPoints = projectedCapPoints,
+            topCandidates = mappedCandidates,
+            recommendation = recommendation,
+            summaryAr = recommendation.summaryAr,
+            isTripleCaptainViable = recommendation.tripleCaptainAssessment?.isViable ?: false,
+            tripleCaptainReasonAr = recommendation.tripleCaptainAssessment?.reasonAr ?: ""
         )
     }
 }

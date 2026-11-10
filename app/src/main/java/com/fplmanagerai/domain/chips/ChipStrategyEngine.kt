@@ -32,14 +32,16 @@ class ChipStrategyEngine(
         budget: Double = 100.0,
         recordSnapshots: Boolean = true
     ): ChipPortfolioPlan {
-        val currentHalf = ChipHalf.fromGameweek(currentGameweek)
+        // Clamp gameweek strictly within official FPL season bounds [1..38]
+        val validGw = currentGameweek.coerceIn(1, config.totalGameweeks)
+        val currentHalf = ChipHalf.fromGameweek(validGw)
 
         // 1. Run individual analyzers for the active half
         val tcAnalysisRaw = tripleCaptainAnalyzer.analyze(
             squad = squad,
             allPlayers = allPlayers,
             fixtures = fixtures,
-            currentGameweek = currentGameweek,
+            currentGameweek = validGw,
             userHistory = userHistory,
             half = currentHalf
         )
@@ -47,7 +49,7 @@ class ChipStrategyEngine(
         val bbAnalysisRaw = benchBoostAnalyzer.analyze(
             squad = squad,
             fixtures = fixtures,
-            currentGameweek = currentGameweek,
+            currentGameweek = validGw,
             userHistory = userHistory,
             half = currentHalf
         )
@@ -56,7 +58,7 @@ class ChipStrategyEngine(
             squad = squad,
             allPlayers = allPlayers,
             fixtures = fixtures,
-            currentGameweek = currentGameweek,
+            currentGameweek = validGw,
             userHistory = userHistory,
             budget = budget,
             half = currentHalf
@@ -66,7 +68,7 @@ class ChipStrategyEngine(
             squad = squad,
             allPlayers = allPlayers,
             fixtures = fixtures,
-            currentGameweek = currentGameweek,
+            currentGameweek = validGw,
             userHistory = userHistory,
             freeTransfersAvailable = freeTransfers,
             budget = budget,
@@ -100,7 +102,7 @@ class ChipStrategyEngine(
                         verdict = ChipVerdict.ACTIVATE_NOW
                     )
                 } else if (analysis.verdict == ChipVerdict.ACTIVATE_NOW) {
-                    val fallbackGw = (analysis.alternativeGameweeks.firstOrNull() ?: (currentGameweek + 3)).coerceAtMost(if (currentHalf == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks)
+                    val fallbackGw = (analysis.alternativeGameweeks.firstOrNull() ?: (validGw + 3)).coerceAtMost(if (currentHalf == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks)
                     rawAnalyses[type] = analysis.copy(
                         verdict = ChipVerdict.SAVE_FOR_LATER,
                         recommendedGameweek = fallbackGw,
@@ -108,7 +110,7 @@ class ChipStrategyEngine(
                     )
                 }
             }
-        } else if (userHistory.pendingChip != null && userHistory.pendingChipGameweek == currentGameweek) {
+        } else if (userHistory.pendingChip != null && userHistory.pendingChipGameweek == validGw) {
             // User has a pending chip selected before deadline
             winningChip = userHistory.pendingChip.chipType
             for ((type, analysis) in rawAnalyses) {
@@ -118,7 +120,7 @@ class ChipStrategyEngine(
                         verdict = ChipVerdict.ACTIVATE_NOW
                     )
                 } else if (analysis.verdict == ChipVerdict.ACTIVATE_NOW) {
-                    val fallbackGw = (analysis.alternativeGameweeks.firstOrNull() ?: (currentGameweek + 3)).coerceAtMost(if (currentHalf == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks)
+                    val fallbackGw = (analysis.alternativeGameweeks.firstOrNull() ?: (validGw + 3)).coerceAtMost(if (currentHalf == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks)
                     rawAnalyses[type] = analysis.copy(
                         verdict = ChipVerdict.SAVE_FOR_LATER,
                         recommendedGameweek = fallbackGw,
@@ -137,7 +139,7 @@ class ChipStrategyEngine(
             val sortedCandidates = candidatesForNow.sortedWith(
                 compareByDescending<ChipType> { chip ->
                     when (chip) {
-                        ChipType.WILDCARD -> if (currentHalf == ChipHalf.FIRST_HALF && currentGameweek in 18..19) 1000.0 else rawAnalyses[chip]!!.expectedPointsGain
+                        ChipType.WILDCARD -> if (currentHalf == ChipHalf.FIRST_HALF && validGw in 18..19) 1000.0 else rawAnalyses[chip]!!.expectedPointsGain
                         ChipType.FREE_HIT -> if (rawAnalyses[chip]!!.affectedPlayers.size >= 5) 500.0 else rawAnalyses[chip]!!.expectedPointsGain
                         else -> rawAnalyses[chip]!!.expectedPointsGain
                     }
@@ -150,7 +152,7 @@ class ChipStrategyEngine(
             val halfEndGw = if (currentHalf == ChipHalf.FIRST_HALF) config.firstHalfDeadlineGw else config.totalGameweeks
             for (demotedChip in sortedCandidates.drop(1)) {
                 val demotedAnalysis = rawAnalyses[demotedChip]!!
-                val fallbackGw = (demotedAnalysis.alternativeGameweeks.firstOrNull() ?: (currentGameweek + 4)).coerceAtMost(halfEndGw)
+                val fallbackGw = (demotedAnalysis.alternativeGameweeks.firstOrNull() ?: (validGw + 4)).coerceAtMost(halfEndGw)
                 val note = "قاعدة رسمية: يُمنع تفعيل أكثر من رقاقة في نفس الجولة. تم تفضيل ${winningChip.titleAr} كأولوية قصوى وتأجيل هذه الرقاقة للجولة $fallbackGw."
 
                 rawAnalyses[demotedChip] = demotedAnalysis.copy(
@@ -179,10 +181,10 @@ class ChipStrategyEngine(
         if (recordSnapshots) {
             for ((type, analysis) in rawAnalyses) {
                 val snapshot = ChipRecommendationSnapshot(
-                    snapshotId = "rec_gw${currentGameweek}_${type.code}_set${currentHalf.setNumber}",
+                    snapshotId = "rec_gw${validGw}_${type.code}_set${currentHalf.setNumber}",
                     chip = type,
                     half = currentHalf,
-                    gameweek = currentGameweek,
+                    gameweek = validGw,
                     predictedIncrementalGain = analysis.expectedPointsGain,
                     confidence = analysis.confidence,
                     targetPlayerId = analysis.targetPlayer?.id,
@@ -213,7 +215,7 @@ class ChipStrategyEngine(
         val summaryAr = when {
             winningChip != null -> {
                 val winningAnalysis = rawAnalyses[winningChip]!!
-                "توصية الجولة $currentGameweek: يُنصح بتفعيل ${winningChip.titleAr} (${currentHalf.titleAr}) بفارق نقطي متوقع (+%.1f نقطة). ${winningAnalysis.primaryReasonAr}".format(Locale.US, winningAnalysis.expectedPointsGain)
+                "توصية الجولة $validGw: يُنصح بتفعيل ${winningChip.titleAr} (${currentHalf.titleAr}) بفارق نقطي متوقع (+%.1f نقطة). ${winningAnalysis.primaryReasonAr}".format(Locale.US, winningAnalysis.expectedPointsGain)
             }
             rawAnalyses.values.all { it.status == ChipStatus.USED || it.status == ChipStatus.EXPIRED } -> {
                 "تم استهلاك كافة رقاقات المجموعة الحالية (${currentHalf.titleAr}). ركّز على التبديلات المجانية والتخطيط الأسبوعي."
@@ -231,10 +233,10 @@ class ChipStrategyEngine(
         }
 
         return ChipPortfolioPlan(
-            currentGameweek = currentGameweek,
+            currentGameweek = validGw,
             currentHalf = currentHalf,
             activeChipThisGameweek = winningChip,
-            pendingChipThisGameweek = if (userHistory.pendingChipGameweek == currentGameweek) userHistory.pendingChip?.chipType else null,
+            pendingChipThisGameweek = if (userHistory.pendingChipGameweek == validGw) userHistory.pendingChip?.chipType else null,
             chipAnalyses = rawAnalyses,
             allChipAnalyses = allAnalysesList,
             overallStrategySummaryAr = summaryAr,

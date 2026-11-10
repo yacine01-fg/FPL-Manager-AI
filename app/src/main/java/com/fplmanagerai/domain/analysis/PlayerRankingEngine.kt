@@ -3,6 +3,9 @@ package com.fplmanagerai.domain.analysis
 import com.fplmanagerai.data.model.PlayerModel
 import com.fplmanagerai.data.model.PlayerPosition
 import com.fplmanagerai.data.model.TransferRecommendation
+import com.fplmanagerai.domain.team.OptimizationStrategy
+import com.fplmanagerai.domain.team.OptimizedSquad
+import com.fplmanagerai.domain.team.SquadOptimizer
 
 enum class RankingCriteria(val titleAr: String) {
     EXPECTED_POINTS("النقاط المتوقعة (xPts)"),
@@ -20,8 +23,38 @@ data class CategorizedRankings(
 )
 
 class PlayerRankingEngine(
-    private val expectedPointsCalculator: ExpectedPointsCalculator = ExpectedPointsCalculator()
+    private val expectedPointsCalculator: ExpectedPointsCalculator = ExpectedPointsCalculator(),
+    private val captaincyAnalyzer: CaptaincyAnalyzer = CaptaincyAnalyzer(),
+    private val squadOptimizer: SquadOptimizer = SquadOptimizer()
 ) {
+
+    /**
+     * ترشيح الكابتن ونائب الكابتن والبدائل اعتماداً على المحرك المركزي الموحد CaptaincyAnalyzer.
+     */
+    fun recommendCaptaincy(
+        players: List<PlayerModel>,
+        currentGameweek: Int
+    ): CaptaincyRecommendation {
+        val enriched = enrichAndRank(players, currentGameweek)
+        return captaincyAnalyzer.recommend(enriched)
+    }
+
+    /**
+     * بناء التشكيلة المثالية المكونة من 15 لاعباً وتحديد الأساسيين والبدلاء.
+     */
+    fun optimizeSquad(
+        players: List<PlayerModel>,
+        currentGameweek: Int,
+        budget: Double = 100.0,
+        strategy: OptimizationStrategy = OptimizationStrategy.BALANCED
+    ): OptimizedSquad {
+        val enriched = enrichAndRank(players, currentGameweek)
+        return squadOptimizer.optimizeSquad(
+            allPlayers = enriched,
+            budget = budget,
+            strategy = strategy
+        )
+    }
 
     fun enrichAndRank(
         players: List<PlayerModel>,

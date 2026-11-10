@@ -52,7 +52,25 @@ class WildcardAnalyzer(
             )
         }
 
-        // 2. Check rule: Wildcard cannot be activated in Gameweek 1
+        // 2. Data Validation: Guard against missing squad or player data
+        if (squad.isEmpty() || allPlayers.isEmpty()) {
+            return SingleChipAnalysis(
+                chip = ChipType.WILDCARD,
+                half = half,
+                status = currentState,
+                verdict = ChipVerdict.SAVE_FOR_LATER,
+                recommendedGameweek = currentGameweek,
+                alternativeGameweeks = emptyList(),
+                expectedPointsGain = 0.0,
+                currentGwGain = 0.0,
+                futureOpportunityGain = 0.0,
+                confidence = ChipConfidence.LOW,
+                primaryReasonAr = "بيانات التشكيلة أو اللاعبين غير كافية لتقييم الوايلد كارد.",
+                detailedPointsAr = listOf("تأكد من تحميل قائمة اللاعبين والتشكيلة الحالية.")
+            )
+        }
+
+        // 3. Check rule: Wildcard cannot be activated in Gameweek 1
         if (currentGameweek == 1 && ChipType.WILDCARD in config.disallowedChipsInGw1) {
             return SingleChipAnalysis(
                 chip = ChipType.WILDCARD,
@@ -70,14 +88,19 @@ class WildcardAnalyzer(
             )
         }
 
-        // 3. Assess Squad Health & Crisis Indicators
-        val injuredOrSuspended = squad.filter {
+        // 4. Assess Squad Health & Crisis Indicators
+        val confirmedCasualties = squad.filter {
             !it.availability.isAvailable || it.availability.status in listOf("i", "s", "u") ||
+                    (it.availability.chanceOfPlayingNextRound != null && it.availability.chanceOfPlayingNextRound == 0)
+        }
+
+        val doubtfulPlayers = squad.filter {
+            it !in confirmedCasualties &&
                     (it.availability.chanceOfPlayingNextRound != null && it.availability.chanceOfPlayingNextRound < 75)
         }
 
         val lowMinutesOrInactive = squad.filter {
-            it !in injuredOrSuspended && (it.minutesPlayed < 200 || it.prediction?.riskLevel == RiskLevel.CRITICAL)
+            it !in confirmedCasualties && it !in doubtfulPlayers && (it.minutesPlayed < 200 || it.prediction?.riskLevel == RiskLevel.CRITICAL)
         }
 
         val badFixtureSwingPlayers = squad.filter { p ->
@@ -85,28 +108,69 @@ class WildcardAnalyzer(
             upcoming.isNotEmpty() && upcoming.map { it.difficulty }.average() >= 3.6
         }
 
-        // Estimate number of transfers urgently needed to fix squad
-        val urgentIssuesCount = injuredOrSuspended.size + lowMinutesOrInactive.size + (badFixtureSwingPlayers.size / 2)
-        val neededTransfers = urgentIssuesCount.coerceAtLeast(0)
-        val transfersRequiringHits = (neededTransfers - freeTransfersAvailable).coerceAtLeast(0)
-        val hitPointsSaved = transfersRequiringHits * 4
+        val urgentIssuesCount = confirmedCasualties.size + doubtfulPlayers.size + lowMinutesOrInactive.size
 
-        // 4. Mathematical calculation: Multi-Gameweek horizon rebuilding benefit compared with normal FT planning
-        val rebuiltSquad = squadOptimizer.optimizeSquad(
-            allPlayers = allPlayers,
-            budget = budget,
-            strategy = OptimizationStrategy.BALANCED,
-            horizon = horizonGameweeks
-        )
+        // حساب نقاط الخصم الإجبارية (Forced Hits) بواقعية تامة:
+        // لا تحتسب ضربات سالبة (-4) كعائد مؤكد إلا إذا عجزت دكة البدلاء والتبديلات المجانية عن إكمال 11 لاعباً أساسياً
+        val availableFitPlayers = squad.size - confirmedCasualties.size
+        val starting11Shortage = (11 - availableFitPlayers).coerceAtLeast(0)
+        val forcedHitsCount = (starting11Shortage - freeTransfersAvailable).coerceAtLeast(0)
+        val hitPointsSaved = forcedHitsCount * 4
 
-        val currentSquadHorizonPts = squad.take(11).sumOf { p ->
-            (p.prediction?.expectedPoints ?: 3.5) * horizonGameweeks
+        // 5. Mathematical calculation: Multi-Gameweek horizon rebuilding benefit
+        val rebuiltSquad = try {
+            squadOptimizer.optimizeSquad(
+                allPlayers = allPlayers,
+                budget = budget,
+                strategy = OptimizationStrategy.BALANCED,
+                horizon = horizonGameweeks
+            )
+        } catch (_: Exception) {
+            null
         }
-        val rebuiltSquadHorizonPts = rebuiltSquad.projectedStartingPoints * horizonGameweeks
+
+        val currentStarting11 = if (squad.size >= 15) {
+            try {
+                squadOptimizer.optimizeStartingLineup(squad).starting11
+            } catch (_: Exception) {
+                squad.take(11)
+            }
+        } else {
+            squad.take(11)
+        }
+
+        val currentSquadHorizonPts = currentStarting11.sumOf { p ->
+            val horizonList = p.prediction?.horizonPredictions
+            if (!horizonList.isNullOrEmpty()) {
+                horizonList.take(horizonGameweeks).sumOf { it.expectedPoints }
+            } else {
+                val base = if (!p.availability.isAvailable || (p.availability.chanceOfPlayingNextRound ?: 100) == 0) 0.0
+                else (p.prediction?.expectedPoints ?: 3.0)
+                base * horizonGameweeks
+            }
+        }
+
+        val rebuiltSquadHorizonPts = rebuiltSquad?.starting11?.sumOf { p ->
+            val horizonList = p.prediction?.horizonPredictions
+            if (!horizonList.isNullOrEmpty()) {
+                horizonList.take(horizonGameweeks).sumOf { it.expectedPoints }
+            } else {
+                (p.prediction?.expectedPoints ?: 3.5) * horizonGameweeks
+            }
+        } ?: currentSquadHorizonPts
 
         val performanceDeltaOverHorizon = (rebuiltSquadHorizonPts - currentSquadHorizonPts).coerceAtLeast(0.0)
         val totalWildcardValue = Math.round((performanceDeltaOverHorizon + hitPointsSaved) * 10.0) / 10.0
-        val currentGwGain = totalWildcardValue
+
+        // العائد النقطي الخاص بالجولة الحالية فقط (لفصله بدقة عن أفق الجولات الخمس)
+        val currentStarting11Pts = currentStarting11.sumOf { p ->
+            if (!p.availability.isAvailable || p.availability.status in listOf("i", "s", "u")) 0.0
+            else p.prediction?.expectedPoints ?: 0.0
+        }
+        val rebuiltStarting11Pts = rebuiltSquad?.starting11?.sumOf { p ->
+            p.prediction?.expectedPoints ?: 0.0
+        } ?: currentStarting11Pts
+        val currentGwGain = Math.round((rebuiltStarting11Pts - currentStarting11Pts).coerceAtLeast(0.0) * 10.0) / 10.0
 
         // 5. Expiration Warning: Set 1 Wildcard expires after GW19 deadline
         val isSet1ExpiryApproaching = half == ChipHalf.FIRST_HALF && currentGameweek in (config.firstHalfDeadlineGw - 1)..config.firstHalfDeadlineGw
@@ -152,10 +216,14 @@ class WildcardAnalyzer(
                 }
             }
 
-            detailedReasons.add("توفير نقاط الخصم (Hits Avoided): يوفر $hitPointsSaved نقطة كانت ستُخصم لإجراء $neededTransfers تبديلات مطلوبة.")
+            if (hitPointsSaved > 0) {
+                detailedReasons.add("توفير نقاط الخصم الإجبارية (Hits Avoided): يوفر $hitPointsSaved نقطة كانت ستُخصم لتعويض النقص في الـ 11 أساسياً.")
+            } else {
+                detailedReasons.add("لا توجد خصومات نقاط إجبارية حالياً (-4)؛ القيمة الحقيقية للوايلد كارد تنبع من التدوير التكتيكي وتحسين معدل النقاط عبر $horizonGameweeks جولات.")
+            }
             detailedReasons.add("فارق النقاط التراكمي المتوقع عبر $horizonGameweeks جولات: +%.1f نقطة.".format(Locale.US, performanceDeltaOverHorizon))
-            if (injuredOrSuspended.isNotEmpty()) {
-                detailedReasons.add("عناصر مصابة/موقوفة يجب التخلص منها: ${injuredOrSuspended.joinToString { it.webName }}.")
+            if (confirmedCasualties.isNotEmpty()) {
+                detailedReasons.add("عناصر مصابة/موقوفة يجب التخلص منها: ${confirmedCasualties.joinToString { it.webName }}.")
             }
             if (isSet1ExpiryApproaching) {
                 detailedReasons.add("قاعدة رسمية: عدم تفعيل وايلد كارد المجموعة الأولى قبل الجولة ${config.secondHalfStartGw} يؤدي لفقدانه نهائياً.")
@@ -172,10 +240,21 @@ class WildcardAnalyzer(
             }
 
             detailedReasons.add("القيمة المتوقعة مستقبلاً (+%.1f نقطة) تتفوق على استخدامها الاضطراري الآن (+%.1f نقطة).".format(Locale.US, futureOpportunityGain, totalWildcardValue))
-            detailedReasons.add("عدد التبديلات المطلوبة حالياً ($neededTransfers) يمكن إدارتها عبر التبديلات المجانية المتاحة ($freeTransfersAvailable).")
+            detailedReasons.add("المشاكل الحالية يمكن إدارتها عبر التبديلات المجانية المتاحة ($freeTransfersAvailable).")
             if (badFixtureSwingPlayers.isNotEmpty()) {
                 detailedReasons.add("راقب تقلب جدول مباريات هؤلاء اللاعبين في الأسابيع القادمة: ${badFixtureSwingPlayers.take(3).joinToString { it.webName }}.")
             }
+        }
+
+        val riskLevel = when {
+            urgentIssuesCount >= 4 -> RiskLevel.LOW
+            urgentIssuesCount in 2..3 -> RiskLevel.MEDIUM
+            else -> RiskLevel.HIGH
+        }
+        val riskAssessmentAr = when {
+            urgentIssuesCount >= 4 -> "مخاطرة منخفضة: الفريق يمر بأزمة غيابات وتراجع مردود تبرر إعادة البناء الكاملة."
+            urgentIssuesCount in 2..3 -> "مخاطرة متوسطة: يمكن حل المشاكل الحالية عبر الانتقالات المجانية وتأجيل الوايلد كارد."
+            else -> "مخاطرة مرتفعة: تشكيلتك مستقرة ولا تستدعي تفريطاً مبكراً في شريحة الوايلد كارد."
         }
 
         return SingleChipAnalysis(
@@ -191,9 +270,11 @@ class WildcardAnalyzer(
             confidence = confidence,
             primaryReasonAr = primaryReason,
             detailedPointsAr = detailedReasons,
-            affectedPlayers = injuredOrSuspended + lowMinutesOrInactive,
-            temporarySquad = rebuiltSquad.totalSquad,
-            expirationWarningAr = expirationWarning
+            affectedPlayers = confirmedCasualties + doubtfulPlayers + lowMinutesOrInactive,
+            temporarySquad = rebuiltSquad?.totalSquad,
+            expirationWarningAr = expirationWarning,
+            riskLevel = riskLevel,
+            riskAssessmentAr = riskAssessmentAr
         )
     }
 }

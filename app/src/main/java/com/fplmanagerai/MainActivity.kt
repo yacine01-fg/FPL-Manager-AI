@@ -8,7 +8,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Dashboard
+import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Stars
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -22,15 +24,18 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.fplmanagerai.data.*
 import com.fplmanagerai.data.cache.LocalDataCache
+import com.fplmanagerai.presentation.accuracy.PredictionAccuracyScreen
 import com.fplmanagerai.presentation.analysis.PlayerAnalysisScreen
 import com.fplmanagerai.presentation.chips.ChipStrategyDashboardScreen
 import com.fplmanagerai.presentation.dashboard.SmartDashboardScreen
+import com.fplmanagerai.presentation.decision.DecisionIntelligenceScreen
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        LocalDataCache.initialize(cacheDir)
+        // استخدام filesDir لضمان حفظ لقطات التوقعات وإصدارات النماذج بشكل دائم وعدم مسحها مع ذاكرة الكاش المؤقتة
+        LocalDataCache.initialize(filesDir)
         setContent { FplManagerApp() }
     }
 }
@@ -66,7 +71,7 @@ class DashboardViewModel : ViewModel() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FplManagerApp(vm: DashboardViewModel = viewModel()) {
-    var selectedNavTab by remember { mutableIntStateOf(1) } // Default to the Analysis Engine
+    var selectedNavTab by remember { mutableIntStateOf(1) } // Default to Decision Intelligence
 
     MaterialTheme(colorScheme = darkColorScheme()) {
         CompositionLocalProvider(LocalLayoutDirection provides androidx.compose.ui.unit.LayoutDirection.Rtl) {
@@ -82,14 +87,26 @@ fun FplManagerApp(vm: DashboardViewModel = viewModel()) {
                         NavigationBarItem(
                             selected = selectedNavTab == 1,
                             onClick = { selectedNavTab = 1 },
-                            icon = { Icon(Icons.Default.Analytics, contentDescription = "محرك التحليل") },
-                            label = { Text("محرك التحليل") }
+                            icon = { Icon(Icons.Default.AutoAwesome, contentDescription = "قرارات الجولة") },
+                            label = { Text("القرارات") }
                         )
                         NavigationBarItem(
                             selected = selectedNavTab == 2,
                             onClick = { selectedNavTab = 2 },
+                            icon = { Icon(Icons.Default.Analytics, contentDescription = "محرك التحليل") },
+                            label = { Text("التحليل") }
+                        )
+                        NavigationBarItem(
+                            selected = selectedNavTab == 3,
+                            onClick = { selectedNavTab = 3 },
                             icon = { Icon(Icons.Default.Stars, contentDescription = "استراتيجية الشرائح") },
-                            label = { Text("استراتيجية الشرائح") }
+                            label = { Text("الشرائح") }
+                        )
+                        NavigationBarItem(
+                            selected = selectedNavTab == 4,
+                            onClick = { selectedNavTab = 4 },
+                            icon = { Icon(Icons.Default.Insights, contentDescription = "دقة التوقعات") },
+                            label = { Text("دقة التوقعات") }
                         )
                     }
                 }
@@ -97,8 +114,10 @@ fun FplManagerApp(vm: DashboardViewModel = viewModel()) {
                 Box(Modifier.fillMaxSize().padding(padding)) {
                     when (selectedNavTab) {
                         0 -> SmartDashboardScreen()
-                        1 -> PlayerAnalysisScreen()
-                        2 -> ChipStrategyDashboardScreen()
+                        1 -> DecisionIntelligenceScreen()
+                        2 -> PlayerAnalysisScreen()
+                        3 -> ChipStrategyDashboardScreen()
+                        4 -> PredictionAccuracyScreen()
                     }
                 }
             }
